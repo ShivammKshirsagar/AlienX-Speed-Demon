@@ -6,9 +6,108 @@ Every step from the reference to your final version, each with the live-board ru
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | | 72.69 | 893 | 0 |
 | 1 | Rust baseline: Unix mmap, parallel chunked parsing, forward CSR, reusable distance state + touched-node list, atomic query distribution, pre-sized output | run-c21758fd2f7f | 1.701 (board) / 5.05 (local) | 238 (board) / 215 (local) | 40.24 (board) |
-| 2 | Cheap reachability shortcuts ($s == t$, $\text{out\_deg}(s) == 0$, $\text{in\_deg}(t) == 0$) [duplicate cache ablated] | TBD | 4.45 (local proxy) | 246 (local proxy) | TBD |
+| 2 | Cheap reachability shortcuts ($s == t$, $\text{out\_deg}(s) == 0$, $\text{in\_deg}(t) == 0$) [duplicate cache ablated] | run-1db5b0ec6c38 | 1.327 (board) / 4.45 (local) | 229 (board) / 246 (local) | 7.229 (board) |
+| 3 | Step B + Step A: Compact per-query state (open-addressing) + 4-ary heap + shared atomic degrees (2-pass zero-intermediate build) + interleaved edges | TBD | 3.68 - 4.03 (local proxy) | 234 - 239 (local proxy) | TBD |
 
-*Note: Step 0 numbers (72.69 s, 893 MB) are the organisers' official scoring-box baseline. Step 1 includes official live board measurements (run-c21758fd2f7f: 1.701 s, 238 MB, S=295, K=6.377) alongside earlier 4-worker local measurements (5.05 s, 215 MB). Step 2 figures (4.45 s container time / 3.42 s internal solution time, 246 MB) are local measurements on an AMD Ryzen 5 4600H under Docker Desktop (WSL2 cgroup v2, 12 workers) and serve as a local proxy; board run ID is marked TBD.*
+*Note: Step 0 numbers (72.69 s, 893 MB) are the organisers' official scoring-box baseline. Step 1 and Step 2 include official live board measurements. Step 3 figures (3.68 s check.py / 2.47 s internal wall time, 233.9 MB peak memory) are local measurements on an AMD Ryzen 5 4600H under Docker Desktop (WSL2 cgroup v2, 12 workers) and serve as a local proxy; board run ID is marked TBD.*
+
+---
+
+## Step 3: Compact Per-Query State (Step B) + Two-Pass Zero-Intermediate Build & Interleaved Edges (Step A)
+
+### 1. Approach & Changes
+- **Compact Per-Query Distance State (`CompactDist`)**:
+  - Replaced each worker's $13.92\text{ MB}$ full-graph distance vector with an open-addressed hash table using 8-byte entries (`Slot { node: u32, dist: u32 }`).
+  - Table starts at `INIT_CAP = 16,384` slots (128 KB) and dynamically grows up to `MAX_CAP = 524,288` slots (4 MB) at 50% load.
+  - Resetting after each query takes $O(|\text{touched}|)$ by traversing only touched slot indices.
+  - Total query-phase memory across all 12 workers drops from $167\text{ MB}$ down to $\approx 24\text{ MB}$.
+- **4-ary Min-Heap (`QuadHeap`)**:
+  - Cache-friendly 4-ary min-heap where all 4 children fit in a contiguous 32-byte span (half a 64-byte cache line). Tree depth is halved relative to a binary heap.
+- **Exact Lazy Fallback (`fallback_dijkstra`)**:
+  - Transparent fallback for distances $\ge 2^{32} - 1$ or queries expanding $> 524,288$ nodes. Fully stress-tested with tiny caps (64/256) and verified 100% byte-identical.
+- **Shared Atomic Degree Array & Two-Pass Build (Step A)**:
+  - Eliminated $12 \times 7\text{ MB} = 84\text{ MB}$ per-worker degree vectors by using a single shared `AtomicU32` array of size $n$ (7 MB).
+  - Eliminated the 60 MB intermediate parsed edge buffer (`Vec<(u32, u32, u32)>`) via a two-pass parser directly from `mmap`:
+    - **Pass 1**: Reads only node $u$ directly from `mmap` and increments `degrees[u]` using relaxed atomics, skipping the rest of each edge line without allocating.
+    - **Prefix sum**: Serial prefix sum on the single 7 MB array takes just $4.96\text{ ms}$.
+    - **Pass 2**: Reads $u, v, w$ from `mmap` and scatters directly into the final CSR array using per-node atomic write offsets.
+  - Build-phase heap footprint drops from $\approx 190\text{ MB}$ to just $\mathbf{54\text{ MB}}$ (`offsets` 7 MB + `write_pos` 7 MB + `edges` 40 MB).
+- **Interleaved Edge Representation**:
+  - Replaced separate 20 MB `heads` and 20 MB `weights` vectors with an interleaved `Edge { target: u32, weight: u32 }` (8 bytes), keeping target and edge weight in the same cache line.
+- **Fast ASCII Parser (`parse_u32_raw`)**:
+  - Unchecked pointer traversal for digit parsing, speeding up Pass 2 build from 453 ms to 217 ms.
+- **Ablation Studies**:
+  - **16-byte slot ablation (`Slot { node: u32, dist: u64 }`, unbounded growth, no fallback)**: Saves 51 lines of code (368 lines vs 419 lines, granting +2.0% on $S^{0.15}$), but increases 1-worker query time by +8.6% (10,437 ms vs 9,372 ms; 449.4 ns vs 403.5 ns/node) and 12-worker query time from 1,780 ms to 2,024 ms due to halving L1 cache line slot density from 8 slots to 4 slots (-4.1% on $T^{0.50}$). Because the time penalty outweighs the line savings in $K$, 8-byte slots with lazy fallback are retained.
+  - **`MAP_POPULATE` experiment**: Tested `MAP_POPULATE` (`0x08000`) on input file mmap. Synchronously faulting the 92 MB file increased mmap time from 2.92 ms to 735.40 ms, increased total process wall time by ~265 ms (2,737 ms vs 2,472 ms), and spiked container peak memory from 233.9 MB to 264.1 MB (+30.2 MB). *(Note: The MAP_POPULATE result is specific to this local VM / WSL2 environment, where forcing all file pages into resident RAM actively charges them against the cgroup v2 memory limit without offering any asynchronous multithreaded faulting benefits).* Lazy `mmap` is retained.
+
+### 2. Phase-by-Phase Memory & Worker Scaling Analysis
+To understand memory consumption across execution phases and worker counts, `/sys/fs/cgroup/memory.current`, `/sys/fs/cgroup/memory.peak`, and the `anon`/`file` split from `/proc/self/smaps_rollup` were instrumented across phase boundaries:
+
+| Phase | 1 Worker: Cur / Peak (Anon / File) | 4 Workers: Cur / Peak (Anon / File) | 12 Workers: Cur / Peak (Anon / File) |
+|---|---:|---:|---:|
+| 01. Startup | 4.97 MB / 5.64 MB (0.1 / 1.9 MB) | 4.72 MB / 5.23 MB (0.1 / 1.8 MB) | 4.95 MB / 4.98 MB (0.1 / 1.9 MB) |
+| 02. Post-mmap | 4.97 MB / 5.64 MB (0.1 / 1.9 MB) | 4.71 MB / 5.23 MB (0.1 / 1.8 MB) | 4.95 MB / 4.98 MB (0.1 / 1.9 MB) |
+| 03. Pass 1 (degrees) | 98.92 MB / 98.93 MB (6.8 / 89.5 MB) | 56.26 MB / 63.04 MB (6.8 / 46.7 MB) | 95.51 MB / 95.77 MB (6.9 / 85.4 MB) |
+| 04. Prefix sum | 105.53 MB / 105.67 MB (13.4 / 89.5 MB) | 55.57 MB / 63.04 MB (13.5 / 39.4 MB) | 102.61 MB / 102.61 MB (13.6 / 85.4 MB) |
+| 05. Pass 2 (scatter) | 144.20 MB / 144.20 MB (51.6 / 89.5 MB) | 101.64 MB / 102.47 MB (51.6 / 47.5 MB) | 144.83 MB / 144.84 MB (51.7 / 89.4 MB) |
+| 06. Queries prep | 144.20 MB / 144.20 MB (51.6 / 89.5 MB) | 101.88 MB / 102.47 MB (51.6 / 47.6 MB) | 144.83 MB / 144.84 MB (51.7 / 89.4 MB) |
+| 07. Post-queries | 152.64 MB / **162.38 MB** (74.8 / 74.8 MB) | 182.75 MB / **183.05 MB** (144.3 / 34.4 MB) | 216.35 MB / **219.27 MB** (201.5 / 10.9 MB) |
+| 08. Post-output | 152.63 MB / 162.38 MB (74.8 / 74.8 MB) | 182.75 MB / 183.05 MB (144.3 / 34.4 MB) | 216.15 MB / 219.27 MB (201.5 / 10.9 MB) |
+
+#### Analysis of the 1-Worker Peak (156 - 162 MB)
+1. **File Page Cache (89.5 MB)**: Reading `graph.txt` during Pass 1 and Pass 2 faults the entire 91.95 MB file into Linux page cache (`Pss_File`).
+2. **CSR Base Structures (51.6 MB)**:
+   - Contiguous 8-byte `Edge` array: $5,000,000 \times 8\text{ bytes} = \mathbf{40.0\text{ MB}}$.
+   - CSR `offsets` array: $(1,740,512 + 1) \times 4\text{ bytes} = \mathbf{6.96\text{ MB}}$.
+   - `has_in` boolean filter: $1,740,512 \times 1\text{ byte} = \mathbf{1.74\text{ MB}}$.
+   - Glibc / Rust runtime: $\approx 2.9\text{ MB}$.
+3. **Query Allocations (~15-20 MB)**:
+   - 1 worker's `CompactDist` table (up to 4.19 MB) + `touched` array (up to 2.10 MB) + `QuadHeap` (up to 3.2 MB) + sequential `fallback_dijkstra` temporary buffer (13.92 MB).
+   - Because Anon is modest (74.8 MB), the kernel does not evict file page cache, yielding a total peak of **156 - 162 MB**.
+
+#### Analysis of the ~7.4 MB per Extra Worker Scaling
+Between 1 worker (peak 162.4 MB) and 12 workers (peak 219.3 MB), the delta is 56.9 MB across 11 extra workers ($\approx 5.2 - 7.4\text{ MB}$ per extra worker depending on cache eviction state):
+1. **Per-Worker Compact State (~9.5 MB committed anon)**:
+   - `CompactDist`: starts at 128 KB, expands dynamically up to `MAX_CAP = 524,288` slots ($524,288 \times 8\text{ bytes} = \mathbf{4.19\text{ MB}}$).
+   - `touched` indices: up to 262,144 entries $\times 8\text{ bytes} = \mathbf{2.10\text{ MB}}$.
+   - `QuadHeap` priority queue: up to 200,000 items $\times 16\text{ bytes} = \mathbf{3.20\text{ MB}}$.
+2. **Glibc Malloc Arenas & Thread Overhead**:
+   - Glibc initializes a separate heap arena per thread, reserving virtual address blocks (`count=57` virtual mappings totaling 843 MB) with committed chunks for heap reallocations.
+3. **Concurrent Fallback Allocations**:
+   - In seed 1, 8 queries trigger `fallback_dijkstra`. In a 12-worker pool, multiple workers can execute fallback concurrently, each holding a temporary $13.92\text{ MB}$ distance vector.
+4. **Kernel Page Cache Reclamation**:
+   - As anonymous memory expands from 51.7 MB to 201.5 MB under 12 workers, the Linux kernel gracefully evicts clean `graph.txt` page cache pages (`File` memory drops from 89.4 MB down to 10.9 MB), keeping total container peak memory bounded to **219 - 239 MB**.
+
+### 3. Measured Results (Local Proxy)
+- **Phase Breakdown (12 workers vs 1 worker, full seed 1)**:
+  - **12 workers**:
+    - `mmap`: 2.92 ms
+    - `build`: 664.66 ms (`pass1`: 401.88 ms, `prefix`: 4.96 ms, `pass2`: 217.31 ms)
+    - `queries`: 1,780.44 ms
+    - `total`: 2,472.61 ms
+    - Peak memory: **233.92 MB** ($245,280,768$ bytes)
+  - **1 worker**:
+    - `mmap`: 4.47 ms
+    - `build`: 2,672.15 ms (`pass1`: 1,108.48 ms, `prefix`: 4.66 ms, `pass2`: 1,533.19 ms)
+    - `queries`: **9,372.22 ms** (down from 9,609 ms in Step B and 10,269 ms in Step 1)
+    - Query rate: **403.5 ns / settled node** (23,226,759 settled nodes)
+    - Peak memory: **156.45 MB** ($164,048,896$ bytes)
+- **Local Benchmark (5 runs, warm cache, 12 workers)**:
+  - Run 1: 3.695 s, peak: 239.39 MB
+  - Run 2: 4.031 s, peak: 253.06 MB
+  - Run 3: 3.905 s, peak: 251.93 MB
+  - Run 4: 4.256 s, peak: 235.20 MB
+  - Run 5: 4.422 s, peak: 230.52 MB
+  - **Median time**: **4.031 s** (including Docker overhead; `check.py` single run **3.68 s**).
+  - **Median peak memory**: **239.39 MB** ($251,019,264$ bytes).
+- **Source Size ($S$)**: **419 non-blank, non-comment code lines** in `track-d/src/main.rs`.
+- **Direct Runtime Dependencies ($D$)**: **$D = 1$** (zero external dependencies).
+- **Verification**:
+  - Worked example, empty queries, single node, $m = 0$: all PASS.
+  - Multi-seed tiny & sample datasets (seeds 1, 2, 3, 7): all PASS.
+  - Full seed 1: exact SHA-256 `a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e` (PASS).
+  - 50/50 randomized stress tests: all PASS.
+  - Official gate `check.py`: PASS.
 
 ---
 
