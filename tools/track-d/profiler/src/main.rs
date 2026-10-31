@@ -1,9 +1,13 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Instant;
 
 const INF: u64 = u64::MAX;
+const EMPTY_SLOT: u32 = u32::MAX;
+const INF32: u32 = u32::MAX;
+const INIT_CAP: usize = 16384;
+const MAX_CAP: usize = 524288;
 
 struct Mapping {
     ptr: *mut u8,
@@ -14,7 +18,7 @@ unsafe impl Send for Mapping {}
 unsafe impl Sync for Mapping {}
 
 impl Mapping {
-    fn open(path: &Path) -> Self {
+    fn open(path: &Path, populate: bool) -> Self {
         use std::os::unix::io::AsRawFd;
         let file = std::fs::File::open(path).expect("open input");
         let len = file.metadata().expect("input metadata").len() as usize;
@@ -34,7 +38,9 @@ impl Mapping {
                 offset: isize,
             ) -> *mut std::ffi::c_void;
         }
-        let ptr = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, file.as_raw_fd(), 0) };
+        // MAP_PRIVATE = 2, MAP_POPULATE = 0x08000
+        let flags = if populate { 2 | 0x08000 } else { 2 };
+        let ptr = unsafe { mmap(std::ptr::null_mut(), len, 1, flags, file.as_raw_fd(), 0) };
         assert_ne!(ptr as isize, -1, "mmap failed");
         Self {
             ptr: ptr.cast(),
@@ -66,11 +72,11 @@ impl Drop for Mapping {
 }
 
 #[inline(always)]
-fn parse_u32_fast(bytes: &[u8], pos: &mut usize) -> u32 {
-    let mut n = (bytes[*pos] - b'0') as u32;
+unsafe fn parse_u32_raw(ptr: *const u8, pos: &mut usize) -> u32 {
+    let mut n = (*ptr.add(*pos) - b'0') as u32;
     *pos += 1;
-    while *pos < bytes.len() {
-        let b = bytes[*pos];
+    loop {
+        let b = *ptr.add(*pos);
         if b < b'0' || b > b'9' {
             break;
         }
@@ -80,7 +86,305 @@ fn parse_u32_fast(bytes: &[u8], pos: &mut usize) -> u32 {
     n
 }
 
+#[derive(Copy, Clone)]
+#[repr(C)]
+struct Edge {
+    target: u32,
+    weight: u32,
+}
+
+#[derive(Copy, Clone)]
+struct Slot {
+    node: u32,
+    dist: u32,
+}
+
+struct CompactDist {
+    slots: Vec<Slot>,
+    mask: usize,
+    touched: Vec<usize>,
+}
+
+impl CompactDist {
+    fn new(cap: usize) -> Self {
+        Self {
+            slots: vec![Slot { node: EMPTY_SLOT, dist: INF32 }; cap],
+            mask: cap - 1,
+            touched: Vec::with_capacity(1024),
+        }
+    }
+
+    #[inline(always)]
+    fn get(&self, node: u32) -> u32 {
+        let mut idx = (node as usize).wrapping_mul(0x9E3779B9) & self.mask;
+        loop {
+            let slot = unsafe { self.slots.get_unchecked(idx) };
+            if slot.node == node {
+                return slot.dist;
+            }
+            if slot.node == EMPTY_SLOT {
+                return INF32;
+            }
+            idx = (idx + 1) & self.mask;
+        }
+    }
+
+    fn grow(&mut self) {
+        let new_cap = self.slots.len() * 2;
+        let new_mask = new_cap - 1;
+        let mut new_slots = vec![Slot { node: EMPTY_SLOT, dist: INF32 }; new_cap];
+        let mut new_touched = Vec::with_capacity(self.touched.len() * 2);
+        for &idx in &self.touched {
+            let slot = self.slots[idx];
+            let mut nidx = (slot.node as usize).wrapping_mul(0x9E3779B9) & new_mask;
+            loop {
+                let target = unsafe { new_slots.get_unchecked_mut(nidx) };
+                if target.node == EMPTY_SLOT {
+                    *target = slot;
+                    new_touched.push(nidx);
+                    break;
+                }
+                nidx = (nidx + 1) & new_mask;
+            }
+        }
+        self.slots = new_slots;
+        self.mask = new_mask;
+        self.touched = new_touched;
+    }
+
+    #[inline(always)]
+    fn try_relax(&mut self, node: u32, new_dist: u32) -> Option<bool> {
+        if self.touched.len() * 2 >= self.mask {
+            if self.slots.len() < MAX_CAP {
+                self.grow();
+            } else {
+                return None;
+            }
+        }
+        let mut idx = (node as usize).wrapping_mul(0x9E3779B9) & self.mask;
+        loop {
+            let slot = unsafe { self.slots.get_unchecked_mut(idx) };
+            if slot.node == node {
+                if new_dist < slot.dist {
+                    slot.dist = new_dist;
+                    return Some(true);
+                }
+                return Some(false);
+            }
+            if slot.node == EMPTY_SLOT {
+                slot.node = node;
+                slot.dist = new_dist;
+                self.touched.push(idx);
+                return Some(true);
+            }
+            idx = (idx + 1) & self.mask;
+        }
+    }
+
+    #[inline(always)]
+    fn clear(&mut self) {
+        for &idx in &self.touched {
+            unsafe {
+                let slot = self.slots.get_unchecked_mut(idx);
+                slot.node = EMPTY_SLOT;
+                slot.dist = INF32;
+            }
+        }
+        self.touched.clear();
+    }
+}
+
+#[derive(Copy, Clone)]
+struct HeapItem {
+    dist: u64,
+    node: u32,
+}
+
+struct QuadHeap {
+    data: Vec<HeapItem>,
+}
+
+impl QuadHeap {
+    fn new() -> Self {
+        Self {
+            data: Vec::with_capacity(1024),
+        }
+    }
+
+    #[inline(always)]
+    fn push(&mut self, dist: u64, node: u32) {
+        let mut idx = self.data.len();
+        self.data.push(HeapItem { dist, node });
+        while idx > 0 {
+            let parent = (idx - 1) >> 2;
+            if self.data[idx].dist < self.data[parent].dist {
+                self.data.swap(idx, parent);
+                idx = parent;
+            } else {
+                break;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn pop(&mut self) -> Option<(u64, u32)> {
+        if self.data.is_empty() {
+            return None;
+        }
+        let res = self.data.swap_remove(0);
+        if !self.data.is_empty() {
+            let len = self.data.len();
+            let mut idx = 0;
+            loop {
+                let child_base = (idx << 2) + 1;
+                if child_base >= len {
+                    break;
+                }
+                let child_end = (child_base + 4).min(len);
+                let mut min_child = child_base;
+                let mut min_dist = self.data[child_base].dist;
+                for c in (child_base + 1)..child_end {
+                    let d = self.data[c].dist;
+                    if d < min_dist {
+                        min_dist = d;
+                        min_child = c;
+                    }
+                }
+                if min_dist < self.data[idx].dist {
+                    self.data.swap(idx, min_child);
+                    idx = min_child;
+                } else {
+                    break;
+                }
+            }
+        }
+        Some((res.dist, res.node))
+    }
+
+    #[inline(always)]
+    fn clear(&mut self) {
+        self.data.clear();
+    }
+}
+
+fn fallback_dijkstra(
+    s: u32,
+    t: u32,
+    n: u32,
+    offsets: &[u32],
+    edges: &[Edge],
+    heap: &mut QuadHeap,
+) -> u64 {
+    let mut dist = vec![INF; n as usize];
+    heap.clear();
+    dist[s as usize] = 0;
+    heap.push(0u64, s);
+
+    let mut ans = INF;
+    while let Some((d, u)) = heap.pop() {
+        if d > dist[u as usize] {
+            continue;
+        }
+        if u == t {
+            ans = d;
+            break;
+        }
+        let start = offsets[u as usize] as usize;
+        let end = offsets[u as usize + 1] as usize;
+        for i in start..end {
+            let edge = unsafe { edges.get_unchecked(i) };
+            let nd = d + edge.weight as u64;
+            if nd < dist[edge.target as usize] {
+                dist[edge.target as usize] = nd;
+                heap.push(nd, edge.target);
+            }
+        }
+    }
+    heap.clear();
+    ans
+}
+
+#[derive(Debug, Clone)]
+struct MemSample {
+    phase: &'static str,
+    cgroup_cur_mb: f64,
+    cgroup_peak_mb: f64,
+    rss_mb: f64,
+    anon_mb: f64,
+    file_mb: f64,
+}
+
+fn sample_mem(phase: &'static str) -> MemSample {
+    let cur_b = std::fs::read_to_string("/sys/fs/cgroup/memory.current")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let peak_b = std::fs::read_to_string("/sys/fs/cgroup/memory.peak")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let mut rss_kb = 0u64;
+    let mut anon_kb = 0u64;
+    let mut file_kb = 0u64;
+
+    if let Ok(content) = std::fs::read_to_string("/proc/self/smaps_rollup") {
+        for line in content.lines() {
+            if line.starts_with("Rss:") {
+                rss_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            } else if line.starts_with("Pss_Anon:") || line.starts_with("Anonymous:") {
+                if anon_kb == 0 {
+                    anon_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                }
+            } else if line.starts_with("Pss_File:") {
+                file_kb = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            }
+        }
+    }
+
+    MemSample {
+        phase,
+        cgroup_cur_mb: (cur_b as f64) / (1024.0 * 1024.0),
+        cgroup_peak_mb: (peak_b as f64) / (1024.0 * 1024.0),
+        rss_mb: (rss_kb as f64) / 1024.0,
+        anon_mb: (anon_kb as f64) / 1024.0,
+        file_mb: (file_kb as f64) / 1024.0,
+    }
+}
+
+fn log_smaps_breakdown() {
+    if let Ok(content) = std::fs::read_to_string("/proc/self/maps") {
+        let mut total_anon_kb = 0usize;
+        let mut count_anon = 0usize;
+        let mut anon_mappings = Vec::new();
+        for line in content.lines() {
+            let parts = line.split_whitespace().collect::<Vec<_>>();
+            if parts.len() < 5 { continue; }
+            let range = parts[0];
+            let perms = parts[1];
+            let path = if parts.len() >= 6 { parts[5] } else { "[anon]" };
+            let (start_str, end_str) = range.split_once('-').unwrap_or(("", ""));
+            let start = usize::from_str_radix(start_str, 16).unwrap_or(0);
+            let end = usize::from_str_radix(end_str, 16).unwrap_or(0);
+            let size_kb = (end - start) / 1024;
+            if path == "[anon]" || path.starts_with("[stack") || path == "[heap]" {
+                total_anon_kb += size_kb;
+                count_anon += 1;
+                anon_mappings.push((size_kb, perms, path));
+            }
+        }
+        anon_mappings.sort_by(|a, b| b.0.cmp(&a.0));
+        eprintln!("ANON BREAKDOWN: count={} total_virtual_anon={:.2}MB", count_anon, (total_anon_kb as f64) / 1024.0);
+        for (kb, perms, name) in anon_mappings.iter().take(15) {
+            eprintln!("  mapping: {:.2}MB ({:5} kB) perms={} name={}", (*kb as f64) / 1024.0, kb, perms, name);
+        }
+    }
+}
+
 fn main() {
+    let mut mem_samples = Vec::new();
+    mem_samples.push(sample_mem("01_startup"));
+
     let start_total = Instant::now();
     let mut args = std::env::args_os().skip(1);
     let graph_path = args.next().unwrap_or_else(|| "/data/graph.txt".into());
@@ -92,10 +396,13 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
 
+    let use_populate = std::env::var("USE_POPULATE").is_ok();
+
     let t0 = Instant::now();
-    let graph_map = Mapping::open(Path::new(&graph_path));
-    let queries_map = Mapping::open(Path::new(&queries_path));
+    let graph_map = Mapping::open(Path::new(&graph_path), use_populate);
+    let queries_map = Mapping::open(Path::new(&queries_path), false);
     let mmap_time = t0.elapsed();
+    mem_samples.push(sample_mem("02_post_mmap"));
 
     let t_parse_start = Instant::now();
     let g_data = graph_map.bytes();
@@ -109,9 +416,10 @@ fn main() {
     }
 
     let mut h_pos = 0;
-    let n = parse_u32_fast(header, &mut h_pos);
+    let h_ptr = header.as_ptr();
+    let n = unsafe { parse_u32_raw(h_ptr, &mut h_pos) };
     h_pos += 1;
-    let m = parse_u32_fast(header, &mut h_pos);
+    let m = unsafe { parse_u32_raw(h_ptr, &mut h_pos) };
 
     let edges_data = &g_data[pos..];
     let num_threads = if worker_override > 0 {
@@ -134,92 +442,108 @@ fn main() {
     }
     bounds.push(edges_data.len());
 
-    let worker_data = thread::scope(|scope| {
-        let mut joins = Vec::with_capacity(num_threads);
+    // Step A: Shared atomic degree array (one single 7 MB array)
+    let degrees = (0..n).map(|_| AtomicU32::new(0)).collect::<Vec<_>>();
+
+    // Pass 1: Parse u and count degrees, skip rest of line
+    let t_pass1_start = Instant::now();
+    thread::scope(|scope| {
         for i in 0..num_threads {
             let start = bounds[i];
             let end = bounds[i + 1];
-            joins.push(scope.spawn(move || {
+            let degrees = &degrees;
+            scope.spawn(move || {
                 let slice = &edges_data[start..end];
+                let ptr = slice.as_ptr();
                 let mut cur = 0;
-                let mut edges = Vec::with_capacity((end - start) / 16);
-                let mut deg = vec![0u32; n as usize];
                 while cur < slice.len() {
                     if slice[cur] == b'\n' || slice[cur] == b'\r' {
                         cur += 1;
                         continue;
                     }
-                    let u = parse_u32_fast(slice, &mut cur);
-                    cur += 1;
-                    let v = parse_u32_fast(slice, &mut cur);
-                    cur += 1;
-                    let w = parse_u32_fast(slice, &mut cur);
-                    while cur < slice.len() && (slice[cur] == b'\r' || slice[cur] == b'\n') {
+                    let u = unsafe { parse_u32_raw(ptr, &mut cur) };
+                    unsafe {
+                        degrees.get_unchecked(u as usize).fetch_add(1, Ordering::Relaxed);
+                    }
+                    while cur < slice.len() && slice[cur] != b'\n' {
                         cur += 1;
                     }
-                    deg[u as usize] += 1;
-                    edges.push((u, v, w));
-                }
-                (edges, deg)
-            }));
-        }
-        joins
-            .into_iter()
-            .map(|j| j.join().expect("parse thread panicked"))
-            .collect::<Vec<_>>()
-    });
-    let parse_time = t_parse_start.elapsed();
-
-    let t_build_start = Instant::now();
-    let mut offsets = vec![0u32; n as usize + 1];
-    let mut sum = 0u32;
-    let mut worker_partitions = worker_data;
-    let t_prefix_start = Instant::now();
-    for u in 0..n as usize {
-        offsets[u] = sum;
-        for (_, deg) in &mut worker_partitions {
-            let cnt = deg[u];
-            deg[u] = sum;
-            sum += cnt;
-        }
-    }
-    offsets[n as usize] = sum;
-    let prefix_loop_time = t_prefix_start.elapsed();
-
-    let mut heads = vec![0u32; sum as usize];
-    let mut weights = vec![0u32; sum as usize];
-
-    let heads_ptr = heads.as_mut_ptr() as usize;
-    let weights_ptr = weights.as_mut_ptr() as usize;
-
-    let t_scatter_start = Instant::now();
-    thread::scope(|scope| {
-        for (edges, mut deg) in worker_partitions {
-            scope.spawn(move || {
-                let h_ptr = heads_ptr as *mut u32;
-                let w_ptr = weights_ptr as *mut u32;
-                for (u, v, w) in edges {
-                    let p = deg[u as usize];
-                    deg[u as usize] += 1;
-                    unsafe {
-                        *h_ptr.add(p as usize) = v;
-                        *w_ptr.add(p as usize) = w;
+                    if cur < slice.len() {
+                        cur += 1;
                     }
                 }
             });
         }
     });
-    let scatter_time = t_scatter_start.elapsed();
-    let build_time = t_build_start.elapsed();
+    let pass1_time = t_pass1_start.elapsed();
+    mem_samples.push(sample_mem("03_post_pass1"));
+
+    // Prefix sum on the single 7 MB array
+    let t_prefix_start = Instant::now();
+    let mut offsets = vec![0u32; n as usize + 1];
+    let mut sum = 0u32;
+    for u in 0..n as usize {
+        offsets[u] = sum;
+        sum += degrees[u].load(Ordering::Relaxed);
+    }
+    offsets[n as usize] = sum;
+    let prefix_time = t_prefix_start.elapsed();
+
+    // Drop degrees, create write_pos from offsets
+    drop(degrees);
+    let write_pos = (0..n).map(|u| AtomicU32::new(offsets[u as usize])).collect::<Vec<_>>();
+    mem_samples.push(sample_mem("04_post_prefix"));
+
+    // Interleaved edges array (40 MB)
+    let mut edges = vec![Edge { target: 0, weight: 0 }; sum as usize];
+    let edges_ptr = edges.as_mut_ptr() as usize;
+
+    // Pass 2: Parse u, v, w and scatter directly into interleaved CSR
+    let t_pass2_start = Instant::now();
+    thread::scope(|scope| {
+        for i in 0..num_threads {
+            let start = bounds[i];
+            let end = bounds[i + 1];
+            let write_pos = &write_pos;
+            scope.spawn(move || {
+                let slice = &edges_data[start..end];
+                let ptr = slice.as_ptr();
+                let mut cur = 0;
+                let e_ptr = edges_ptr as *mut Edge;
+                while cur < slice.len() {
+                    if slice[cur] == b'\n' || slice[cur] == b'\r' {
+                        cur += 1;
+                        continue;
+                    }
+                    let u = unsafe { parse_u32_raw(ptr, &mut cur) };
+                    cur += 1;
+                    let v = unsafe { parse_u32_raw(ptr, &mut cur) };
+                    cur += 1;
+                    let w = unsafe { parse_u32_raw(ptr, &mut cur) };
+                    while cur < slice.len() && (slice[cur] == b'\r' || slice[cur] == b'\n') {
+                        cur += 1;
+                    }
+                    let p = unsafe {
+                        write_pos.get_unchecked(u as usize).fetch_add(1, Ordering::Relaxed)
+                    };
+                    unsafe {
+                        *e_ptr.add(p as usize) = Edge { target: v, weight: w };
+                    }
+                }
+            });
+        }
+    });
+    let pass2_time = t_pass2_start.elapsed();
+    drop(write_pos);
+    mem_samples.push(sample_mem("05_post_pass2"));
 
     let mut has_in = vec![false; n as usize];
-    for &v in &heads {
-        if (v as usize) < has_in.len() {
-            has_in[v as usize] = true;
-        }
+    for e in &edges {
+        has_in[e.target as usize] = true;
     }
 
     let q_data = queries_map.bytes();
+    let q_ptr = q_data.as_ptr();
     let mut queries = Vec::new();
     let mut q_pos = 0;
     while q_pos < q_data.len() {
@@ -229,127 +553,115 @@ fn main() {
         if q_pos >= q_data.len() {
             break;
         }
-        let s = parse_u32_fast(q_data, &mut q_pos);
+        let s = unsafe { parse_u32_raw(q_ptr, &mut q_pos) };
         q_pos += 1;
-        let t = parse_u32_fast(q_data, &mut q_pos);
+        let t = unsafe { parse_u32_raw(q_ptr, &mut q_pos) };
         while q_pos < q_data.len() && (q_data[q_pos] == b'\r' || q_data[q_pos] == b'\n') {
             q_pos += 1;
         }
         queries.push((s, t));
     }
 
-    let t_queries_start = Instant::now();
     let num_queries = queries.len();
-    let ablate_dup = std::env::var("ABLATE_DUP_CACHE").map(|v| v == "1").unwrap_or(false);
-
-    let (unique_queries, canonical_idx) = if !ablate_dup {
-        let mut uq = Vec::new();
-        let mut qmap = std::collections::HashMap::new();
-        let mut cidx = Vec::with_capacity(num_queries);
-        for &q in &queries {
-            match qmap.entry(q) {
-                std::collections::hash_map::Entry::Occupied(e) => {
-                    cidx.push(*e.get());
-                }
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    let u_idx = uq.len();
-                    e.insert(u_idx);
-                    uq.push(q);
-                    cidx.push(u_idx);
-                }
-            }
-        }
-        (uq, cidx)
-    } else {
-        let cidx = (0..num_queries).collect::<Vec<_>>();
-        (queries.clone(), cidx)
-    };
-
-    let num_unique = unique_queries.len();
-    let unique_results = (0..num_unique)
+    let results = (0..num_queries)
         .map(|_| AtomicU64::new(INF))
         .collect::<Vec<_>>();
 
     let mut to_solve = Vec::new();
-    for (u_idx, &(s, t)) in unique_queries.iter().enumerate() {
+    for (idx, &(s, t)) in queries.iter().enumerate() {
         if s == t {
-            unique_results[u_idx].store(0, Ordering::Relaxed);
+            results[idx].store(0, Ordering::Relaxed);
         } else if offsets[s as usize + 1] == offsets[s as usize] || !has_in[t as usize] {
-            // Unreachable: remains INF (-1)
+            // Unreachable
         } else {
-            to_solve.push(u_idx);
+            to_solve.push(idx);
         }
     }
+    let parse_build_time = t_parse_start.elapsed();
+    mem_samples.push(sample_mem("06_post_prep"));
 
+    let t_queries_start = Instant::now();
     let total_settled = AtomicU64::new(0);
-
     if !to_solve.is_empty() {
         let work_idx = AtomicUsize::new(0);
-        let q_workers = num_threads.min(to_solve.len());
+        let q_workers = if worker_override > 0 {
+            worker_override
+        } else {
+            thread::available_parallelism()
+                .map_or(1, usize::from)
+                .min(12)
+                .min(to_solve.len())
+        };
 
         thread::scope(|scope| {
             for _ in 0..q_workers {
                 let work_idx = &work_idx;
                 let to_solve = &to_solve;
-                let unique_queries = &unique_queries;
-                let unique_results = &unique_results;
+                let queries = &queries;
+                let results = &results;
                 let offsets = &offsets;
-                let heads = &heads;
-                let weights = &weights;
+                let edges = &edges;
                 let total_settled = &total_settled;
 
                 scope.spawn(move || {
-                    let mut dist = vec![INF; n as usize];
-                    let mut touched = Vec::with_capacity(1024);
-                    let mut heap = std::collections::BinaryHeap::new();
-                    let mut local_settled: u64 = 0;
+                    let mut compact = CompactDist::new(INIT_CAP);
+                    let mut heap = QuadHeap::new();
+                    let mut local_settled = 0u64;
 
                     loop {
                         let widx = work_idx.fetch_add(1, Ordering::Relaxed);
                         if widx >= to_solve.len() {
                             break;
                         }
-                        let u_idx = to_solve[widx];
-                        let (s, t) = unique_queries[u_idx];
+                        let idx = to_solve[widx];
+                        let (s, t) = queries[idx];
                         let mut ans = INF;
+                        let mut need_fallback = false;
 
-                        if s < n {
-                            dist[s as usize] = 0;
-                            touched.push(s);
-                            heap.push(std::cmp::Reverse((0u64, s)));
+                        compact.try_relax(s, 0);
+                        heap.push(0u64, s);
 
-                            while let Some(std::cmp::Reverse((d, u))) = heap.pop() {
-                                if d > dist[u as usize] {
-                                    continue;
-                                }
-                                local_settled += 1;
-                                if u == t {
-                                    ans = d;
+                        while let Some((d, u)) = heap.pop() {
+                            local_settled += 1;
+                            let cur = compact.get(u);
+                            if cur == INF32 || d > cur as u64 {
+                                continue;
+                            }
+                            if u == t {
+                                ans = d;
+                                break;
+                            }
+                            let start = offsets[u as usize] as usize;
+                            let end = offsets[u as usize + 1] as usize;
+                            for i in start..end {
+                                let edge = unsafe { edges.get_unchecked(i) };
+                                let nd = d + edge.weight as u64;
+                                if nd >= INF32 as u64 {
+                                    need_fallback = true;
                                     break;
                                 }
-                                let start = offsets[u as usize] as usize;
-                                let end = offsets[u as usize + 1] as usize;
-                                for i in start..end {
-                                    let v = heads[i];
-                                    let nd = d + weights[i] as u64;
-                                    if nd < dist[v as usize] {
-                                        if dist[v as usize] == INF {
-                                            touched.push(v);
-                                        }
-                                        dist[v as usize] = nd;
-                                        heap.push(std::cmp::Reverse((nd, v)));
+                                match compact.try_relax(edge.target, nd as u32) {
+                                    Some(true) => heap.push(nd, edge.target),
+                                    Some(false) => {}
+                                    None => {
+                                        need_fallback = true;
+                                        break;
                                     }
                                 }
                             }
+                            if need_fallback {
+                                break;
+                            }
                         }
 
-                        for &u in &touched {
-                            dist[u as usize] = INF;
-                        }
-                        touched.clear();
+                        compact.clear();
                         heap.clear();
 
-                        unique_results[u_idx].store(ans, Ordering::Relaxed);
+                        if need_fallback {
+                            ans = fallback_dijkstra(s, t, n, offsets, edges, &mut heap);
+                        }
+
+                        results[idx].store(ans, Ordering::Relaxed);
                     }
                     total_settled.fetch_add(local_settled, Ordering::Relaxed);
                 });
@@ -357,12 +669,12 @@ fn main() {
         });
     }
     let queries_time = t_queries_start.elapsed();
+    mem_samples.push(sample_mem("07_post_queries"));
 
     let t_out_start = Instant::now();
     let mut out_buf = Vec::with_capacity(num_queries * 12);
     for i in 0..num_queries {
-        let u_idx = canonical_idx[i];
-        let ans = unique_results[u_idx].load(Ordering::Relaxed);
+        let ans = results[i].load(Ordering::Relaxed);
         if ans == INF {
             out_buf.extend_from_slice(b"-1\n");
         } else if ans == 0 {
@@ -386,6 +698,7 @@ fn main() {
     }
     std::fs::write(&output_path, &out_buf).expect("write output");
     let out_time = t_out_start.elapsed();
+    mem_samples.push(sample_mem("08_post_output"));
 
     let total_time = start_total.elapsed();
     let tot_settled = total_settled.load(Ordering::Relaxed);
@@ -396,19 +709,32 @@ fn main() {
     };
 
     eprintln!(
-        "PROFILE: workers={} mmap={:.2}ms parse={:.2}ms build={:.2}ms (prefix={:.2}ms scatter={:.2}ms) queries={:.2}ms output={:.2}ms total={:.2}ms | settled={} ({:.1} ns/settled CPU time)",
+        "PROFILE: workers={} populate={} mmap={:.2}ms build={:.2}ms (pass1={:.2}ms prefix={:.2}ms pass2={:.2}ms) queries={:.2}ms output={:.2}ms total={:.2}ms | settled={} ({:.1} ns/settled CPU time)",
         num_threads,
+        use_populate,
         mmap_time.as_secs_f64() * 1000.0,
-        parse_time.as_secs_f64() * 1000.0,
-        build_time.as_secs_f64() * 1000.0,
-        prefix_loop_time.as_secs_f64() * 1000.0,
-        scatter_time.as_secs_f64() * 1000.0,
+        parse_build_time.as_secs_f64() * 1000.0,
+        pass1_time.as_secs_f64() * 1000.0,
+        prefix_time.as_secs_f64() * 1000.0,
+        pass2_time.as_secs_f64() * 1000.0,
         queries_time.as_secs_f64() * 1000.0,
         out_time.as_secs_f64() * 1000.0,
         total_time.as_secs_f64() * 1000.0,
         tot_settled,
         ns_per_settled
     );
+
+    eprintln!("\n=== MEMORY PROFILE ACROSS PHASES (workers={}) ===", num_threads);
+    eprintln!("{:<16} | {:>14} | {:>14} | {:>12} | {:>12} | {:>12}", "Phase", "cgroup.cur(MB)", "cgroup.peak(MB)", "RSS(MB)", "Anon(MB)", "File(MB)");
+    eprintln!("{:-<16}-+-{:-<14}-+-{:-<14}-+-{:-<12}-+-{:-<12}-+-{:-<12}", "", "", "", "", "", "");
+    for s in &mem_samples {
+        eprintln!(
+            "{:<16} | {:>14.2} | {:>14.2} | {:>12.2} | {:>12.2} | {:>12.2}",
+            s.phase, s.cgroup_cur_mb, s.cgroup_peak_mb, s.rss_mb, s.anon_mb, s.file_mb
+        );
+    }
+
+    log_smaps_breakdown();
 
     drop(graph_map);
     drop(queries_map);
