@@ -5,7 +5,7 @@ mkdir -p /data/track-b-profiles
 cat /data/docs.txt >/dev/null
 for run in 1 2 3; do
   /usr/bin/time -v taskset -c 0-11 "$solution" /data "/data/track-b-profiles/final-${run}-dir" \
-    > "/data/track-b-profiles/final-${run}.out" \
+    > /dev/null \
     2> "/data/track-b-profiles/final-${run}.log"
-  sha256sum "/data/track-b-profiles/final-${run}.out"
+  sha256sum "/data/track-b-profiles/final-${run}-dir/results.txt"
 done
