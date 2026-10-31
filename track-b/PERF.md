@@ -163,6 +163,14 @@ The final worked example matched stdout and `results.txt` (SHA-256 `9c296c063de9
 - Seed 4: `0bf35d72fb61f4f510512e16f3f19ed7df7615ccd0331488f3dd737563301fcb`
 - Seed 5: `09abaaf35a7e6f3fd621d16d595c1fcb7a1db1656d32854de77c5ae40b0f0b56`
 The single Docker validation for this round passed on the restored source: base images were allowlisted, the image was 30 MB, the container output hash matched, and runtime including startup was 6.38 s.
+
+## Software-pipelined scan (local WSL measurement, no board run)
+| Phases (ms: parse/table/setup/scan/query/output) | Before (previous min-of-5) | After (min-of-3) |
+|---|---:|---:|
+| Time | 78.8/15.4/19.6/656.7/220.2/4.6 = 995.466 | 40.3/14.6/2.1/676.7/173.3/9.6 = 916.720 |
+| RssAnon | 96,648 KB | 95,292 KB |
+
+Kept WP0–WP3: staged AVX2 token positions, tag-prefetched probing, merged per-term state, stable two-pass radix scatter, query arenas, parallel hot sampling, zeroed bitmap storage, line-start phrase bounds, borrowed list/bitmap rows, and itoa output. Reverted WP4’s bitmap-frequency cutoff because its measured total was over 2% slower. Rust + Dockerfile harness-style count (formatted copy without `.rustfmt.toml`): 941 before, 962 after; the <=700 target was not met. Final seed-1 hash passed; sample seeds 2–5 passed against saved Python-reference outputs.
 ## AVX2 scan/probe rewrite (local WSL measurement, no board run)
 AVX2 token masks and an inline 128-bit term key now serve both corpus passes and phrase verification; scalar fallback remains. Tokenize+probe: 147.32 to 62.21 ns/token; full seed-1 wall: 2.33 to 2.22 s; Rust + Dockerfile: 768 lines. Kept; required hashes passed.
 

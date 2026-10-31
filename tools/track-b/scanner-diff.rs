@@ -20,7 +20,9 @@ fn ids_for_line(line: &[u8], terms: &[solution::Term], table: &solution::ScanTab
     if scalar {
         scalar_tokens(body, &mut push);
     } else {
-        solution::scan_tokens(body, &mut push);
+        let (mut starts, mut ends) = (Vec::new(), Vec::new());
+        solution::token_positions(body, &mut starts, &mut ends);
+        for (&s, &e) in starts.iter().zip(&ends) { push(&body[s as usize..e as usize]); }
     }
     ids
 }
@@ -28,20 +30,17 @@ fn ids_for_line(line: &[u8], terms: &[solution::Term], table: &solution::ScanTab
 fn check_equal(bytes: &[u8], chunk_bytes: usize) {
     let mut scalar = Vec::new();
     scalar_tokens(bytes, |t| scalar.push(t.to_vec()));
-    #[cfg(target_feature = "avx2")]
-    {
-        let mut fast = Vec::new();
-        solution::scan_tokens_avx2_chunks(bytes, chunk_bytes, |t| fast.push(t.to_vec()));
-        assert_eq!(scalar, fast, "token boundary mismatch in synthetic input");
-    }
-    #[cfg(not(target_feature = "avx2"))]
-    panic!("scanner differential must be compiled with AVX2 enabled");
+    let (mut starts, mut ends) = (Vec::new(), Vec::new());
+    solution::token_positions(bytes, &mut starts, &mut ends);
+    let fast: Vec<_> = starts.iter().zip(&ends).map(|(&s, &e)| bytes[s as usize..e as usize].to_vec()).collect();
+    let _ = chunk_bytes;
+    assert_eq!(scalar, fast, "token boundary mismatch in synthetic input");
 }
 
 fn main() {
     let root = std::env::args().nth(1).expect("sample dataset path");
     let queries = fs::read(format!("{root}/queries.txt")).unwrap();
-    let (terms, _) = solution::parse_queries(&queries);
+    let (terms, _, _, _) = solution::parse_queries(&queries);
     let table = solution::ScanTable::new(&terms);
     let docs = fs::read(format!("{root}/docs.txt")).unwrap();
     let mut checked = 0usize;

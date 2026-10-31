@@ -3,11 +3,21 @@ mod solution;
 
 use std::fs;
 
+fn scalar_tokens<F: FnMut(&[u8])>(data: &[u8], mut visit: F) {
+    let mut p = 0;
+    while p < data.len() {
+        while p < data.len() && !data[p].is_ascii_alphanumeric() { p += 1; }
+        let start = p;
+        while p < data.len() && data[p].is_ascii_alphanumeric() { p += 1; }
+        if p > start { visit(&data[start..p]); }
+    }
+}
+
 fn old_match(data: &[u8], ids: &[usize], terms: &[solution::Term], table: &solution::ScanTable) -> bool {
     let mut window = [usize::MAX; 8];
     let mut count = 0usize;
     let mut matched = false;
-    solution::scan_tokens(data, |token| {
+    scalar_tokens(data, |token| {
         if !matched {
             window[count % 8] = solution::lookup(terms, table, token).unwrap_or(usize::MAX);
             count += 1;
@@ -23,7 +33,7 @@ fn old_match(data: &[u8], ids: &[usize], terms: &[solution::Term], table: &solut
 fn main() {
     let root = std::env::args().nth(1).expect("sample data root");
     let qdata = fs::read(format!("{root}/queries.txt")).unwrap();
-    let (terms, queries) = solution::parse_queries(&qdata);
+    let (terms, queries, query_ids, _) = solution::parse_queries(&qdata);
     let table = solution::ScanTable::new(&terms);
     let docs = fs::read(format!("{root}/docs.txt")).unwrap();
     let mut lines = Vec::new();
@@ -33,7 +43,7 @@ fn main() {
         let tab = line.iter().position(|&b| b == b'\t').unwrap();
         let id = line[..tab].iter().fold(0u32, |n, &b| n * 10 + (b - b'0') as u32);
         lines.push(&line[tab + 1..]);
-        solution::scan_tokens(&line[tab + 1..], |token| {
+        scalar_tokens(&line[tab + 1..], |token| {
             if let Some(t) = solution::lookup(&terms, &table, token) {
                 if last[t] != id { last[t] = id; postings[t].push(id); }
             }
@@ -41,7 +51,8 @@ fn main() {
     }
     let mut checked = 0usize;
     for query in queries {
-        let solution::Query::Phrase(ids) = query else { continue };
+        let solution::Query::Phrase(range) = query else { continue };
+        let ids = &query_ids[range];
         let anchor = *ids.iter().min_by_key(|&&t| postings[t].len()).unwrap();
         for &doc in &postings[anchor] {
             if ids.iter().any(|&t| postings[t].binary_search(&doc).is_err()) { continue; }

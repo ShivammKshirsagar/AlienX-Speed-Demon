@@ -1,7 +1,6 @@
 ﻿use std::borrow::Cow;
-use std::{fs::File, io::{self, Write}, os::fd::AsRawFd, path::Path, sync::atomic::{AtomicU64, AtomicUsize, Ordering}, time::Instant};
+use std::{fs::File, io, os::fd::AsRawFd, path::Path, sync::atomic::{AtomicU64, AtomicUsize, Ordering}, time::Instant};
 
-#[repr(C)]
 pub struct Term {
     bytes: Vec<u8>,
     hash: u64,
@@ -10,21 +9,17 @@ pub struct Term {
     offset: usize,
 }
 pub enum Query {
-    Bool(Vec<usize>, Vec<u8>),
-    Phrase(Vec<usize>),
+    Bool(std::ops::Range<usize>, std::ops::Range<usize>),
+    Phrase(std::ops::Range<usize>),
 }
 enum Set<'a> {
-    List(Vec<u32>),
+    List(Cow<'a, [u32]>),
     Bits(Cow<'a, [u64]>),
 }
 struct Postings { data: Vec<u32>, starts: Vec<usize> }
 
 fn folded(x: u8) -> u8 { if x.is_ascii_uppercase() { x + 32 } else { x } }
 fn is_word(x: u8) -> bool { x.is_ascii_lowercase() || x.is_ascii_digit() }
-pub fn scan_document_tokens<F: FnMut(&[u8])>(line: &[u8], visit: F) {
-    if let Some(tab) = line.iter().position(|&b| b == b'\t') { scan_tokens(&line[tab + 1..], visit); }
-}
-#[cfg(target_feature = "avx2")]
 fn word_mask32(bytes: &[u8]) -> u32 {
     use std::arch::x86_64::*;
     // SAFETY: callers pass a slice with at least 32 readable bytes and the build enables AVX2.
@@ -42,56 +37,42 @@ fn word_mask32(bytes: &[u8]) -> u32 {
         _mm256_movemask_epi8(_mm256_or_si256(letters, digits)) as u32
     }
 }
-#[cfg(target_feature = "avx2")]
-pub fn scan_tokens_avx2_chunks<F: FnMut(&[u8])>(data: &[u8], chunk_bytes: usize, mut visit: F) {
-    let chunk_bytes = chunk_bytes.max(1);
-    let mut token_start = None;
-    let mut carry = 0u32;
-    let mut chunk_start = 0usize;
-    while chunk_start < data.len() {
-        let chunk_end = data.len().min(chunk_start.saturating_add(chunk_bytes));
-        let mut base = chunk_start;
-        while base + 32 <= chunk_end {
-            let mask = word_mask32(&data[base..base + 32]);
-            // Starts and ends are bit transitions; carry represents the preceding byte across block boundaries.
-            let mut starts = mask & !((mask << 1) | carry);
-            let mut ends = !mask & ((mask << 1) | carry);
-            while starts != 0 || ends != 0 {
-                let s = starts.trailing_zeros();
-                let e = ends.trailing_zeros();
-                if starts != 0 && (ends == 0 || s < e) {
-                    token_start = Some(base + s as usize);
-                    starts &= starts - 1;
-                } else {
-                    if let Some(start) = token_start.take() {
-                        visit(&data[start..base + e as usize]);
-                    }
-                    ends &= ends - 1;
-                }
-            }
-            carry = mask >> 31;
-            base += 32;
+fn word_mask64(bytes: &[u8]) -> u64 {
+    word_mask32(bytes) as u64 | ((word_mask32(&bytes[32..]) as u64) << 32)
+}
+fn append_positions(mut mask: u64, base: usize, out: &mut Vec<u32>) {
+    while mask != 0 {
+        let count = (mask.count_ones() as usize).min(8);
+        let mut positions = [0u32; 8];
+        // Eight unconditional bit extractions avoid a branch for each token boundary; only the valid prefix is appended.
+        for position in &mut positions {
+            *position = base as u32 + mask.trailing_zeros();
+            mask &= mask.wrapping_sub(1);
         }
-        while base < chunk_end {
-            let word = is_word(folded(data[base]));
-            if word {
-                if token_start.is_none() {
-                    token_start = Some(base);
-                }
-            } else if let Some(start) = token_start.take() {
-                visit(&data[start..base]);
-            }
-            carry = u32::from(word);
-            base += 1;
-        }
-        chunk_start = chunk_end;
-    }
-    if let Some(start) = token_start {
-        visit(&data[start..]);
+        out.extend_from_slice(&positions[..count]);
     }
 }
-pub fn scan_tokens<F: FnMut(&[u8])>(data: &[u8], visit: F) {
-    scan_tokens_avx2_chunks(data, data.len().max(1), visit);
+#[rustfmt::skip]
+pub fn token_positions(text: &[u8], starts: &mut Vec<u32>, ends: &mut Vec<u32>) {
+    starts.clear(); ends.clear();
+    let mut base = 0;
+    let mut carry = 0u64;
+    while base + 64 <= text.len() {
+        let mask = word_mask64(&text[base..base + 64]);
+        append_positions(mask & !((mask << 1) | carry), base, starts);
+        append_positions(!mask & ((mask << 1) | carry), base, ends);
+        carry = mask >> 63;
+        base += 64;
+    }
+    let mut open = carry != 0;
+    for (i, &byte) in text[base..].iter().enumerate() {
+        let word = is_word(folded(byte));
+        let at = (base + i) as u32;
+        if word && !open { starts.push(at); }
+        if !word && open { ends.push(at); }
+        open = word;
+    }
+    if open { ends.push(text.len() as u32); }
 }
 fn hash_bytes(raw: &[u8]) -> u64 {
     raw.iter().fold(0xcbf29ce484222325, |h, &x| (h ^ folded(x) as u64).wrapping_mul(0x100000001b3))
@@ -103,6 +84,7 @@ struct ScanSlot {
     id_plus_one: usize,
     len: usize,
 }
+#[derive(Clone, Copy)]
 struct ScanKey {
     key0: u64,
     key1: u64,
@@ -130,19 +112,22 @@ fn scan_key(raw: &[u8]) -> ScanKey {
 }
 pub struct ScanTable {
     slots: Vec<ScanSlot>,
+    tags: Vec<u32>,
 }
 impl ScanTable {
     pub fn new(terms: &[Term]) -> Self {
         let mut capacity = 1usize;
         while capacity < terms.len().saturating_mul(3).div_ceil(2) { capacity *= 2; }
         let mut slots = vec![ScanSlot::default(); capacity];
+        let mut tags = vec![0u32; capacity];
         for (id, term) in terms.iter().enumerate() {
             let key = scan_key(&term.bytes);
             let mut p = key.hash as usize & (capacity - 1);
             while slots[p].id_plus_one != 0 { p = (p + 1) & (capacity - 1); }
             slots[p] = ScanSlot { key0: key.key0, key1: key.key1, id_plus_one: id + 1, len: term.bytes.len() };
+            tags[p] = (key.hash >> 32) as u32 | 1;
         }
-        Self { slots }
+        Self { slots, tags }
     }
 }
 #[derive(Clone)]
@@ -162,9 +147,8 @@ impl HotTable {
         }
         h
     }
-    fn lookup(&self, raw: &[u8]) -> Option<usize> {
-        if raw.len() > 16 { return None; }
-        let k = scan_key(raw);
+    fn lookup_key(&self, k: ScanKey, len: usize) -> Option<usize> {
+        if len > 16 { return None; }
         let mut p = k.hash as usize & 2047;
         loop {
             let id = self.ids[p];
@@ -176,24 +160,28 @@ impl HotTable {
 }
 pub fn lookup(terms: &[Term], table: &ScanTable, raw: &[u8]) -> Option<usize> {
     if raw.is_empty() { return None; }
-    let key = scan_key(raw);
+    lookup_key(terms, table, scan_key(raw), raw.len(), raw)
+}
+#[rustfmt::skip]
+fn lookup_key(terms: &[Term], table: &ScanTable, key: ScanKey, len: usize, raw: &[u8]) -> Option<usize> {
     let mut p = key.hash as usize & (table.slots.len() - 1);
+    let tag = (key.hash >> 32) as u32 | 1;
     loop {
-        let slot = table.slots[p];
-        if slot.id_plus_one == 0 {
-            return None;
-        }
-        if slot.len == raw.len() && slot.key0 == key.key0 && slot.key1 == key.key1 {
-            let id = slot.id_plus_one - 1;
-            if raw.len() <= 16 || terms[id].bytes.iter().zip(raw).all(|(&a, &b)| a == folded(b)) {
-                return Some(id);
+        let found = table.tags[p];
+        if found == 0 { return None; }
+        if found == tag {
+            let slot = table.slots[p];
+            if slot.len == len && slot.key0 == key.key0 && slot.key1 == key.key1 {
+                let id = slot.id_plus_one - 1;
+                if len <= 16 || terms[id].bytes.iter().zip(raw).all(|(&a, &b)| a == folded(b)) { return Some(id); }
             }
         }
         p = (p + 1) & (table.slots.len() - 1);
     }
 }
 fn intern(raw: &[u8], terms: &mut Vec<Term>, slots: &mut Vec<u32>) -> usize {
-    let h = raw.iter().fold(0xcbf29ce484222325, |h, &x| (h ^ x as u64).wrapping_mul(0x100000001b3));
+    // Reuse the fast folded word hash; exact byte equality below keeps interning case-sensitive.
+    let h = scan_key(raw).hash;
     let mut p = h as usize & (slots.len() - 1);
     loop {
         let v = slots[p];
@@ -210,51 +198,53 @@ fn intern(raw: &[u8], terms: &mut Vec<Term>, slots: &mut Vec<u32>) -> usize {
         p = (p + 1) & (slots.len() - 1);
     }
 }
-pub fn parse_queries(data: &[u8]) -> (Vec<Term>, Vec<Query>) {
+#[rustfmt::skip]
+pub fn parse_queries(data: &[u8]) -> (Vec<Term>, Vec<Query>, Vec<usize>, Vec<u8>) {
     let mut cap = 1usize;
     while cap < data.len() / 4 { cap *= 2; }
     let mut slots = vec![0u32; cap];
     let mut terms = Vec::new();
     let mut queries = Vec::new();
+    let mut query_ids = Vec::new();
+    let mut query_ops = Vec::new();
     for line in data.split(|&b| b == b'\n').filter(|x| !x.is_empty()) {
         let mut p = 0;
         while p < line.len() && line[p] != b' ' { p += 1; }
         let head = &line[..p];
         if head == b"BOOL" {
-            let mut ids = Vec::new();
-            let mut ops = Vec::new();
+            let id_start = query_ids.len(); let op_start = query_ops.len();
             let mut q = p + 1;
             while q < line.len() {
                 let s = q;
                 while q < line.len() && line[q] != b' ' { q += 1; }
-                ids.push(intern(&line[s..q], &mut terms, &mut slots));
+                query_ids.push(intern(&line[s..q], &mut terms, &mut slots));
                 if q < line.len() {
                     q += 1;
                     let op = &line[q..];
                     if op.starts_with(b"OR") {
-                        ops.push(1); q += 2;
+                        query_ops.push(1); q += 2;
                     } else if op.starts_with(b"NOT") {
-                        ops.push(2); q += 3;
+                        query_ops.push(2); q += 3;
                     } else {
-                        ops.push(0); q += 3;
+                        query_ops.push(0); q += 3;
                     }
                     if q < line.len() { q += 1; }
                 }
             }
-            queries.push(Query::Bool(ids, ops));
+            queries.push(Query::Bool(id_start..query_ids.len(), op_start..query_ops.len()));
         } else {
             let s = p + 2;
             let e = line.len() - 1;
-            let mut ids = Vec::new();
-            for t in line[s..e].split(|&b| b == b' ') { ids.push(intern(t, &mut terms, &mut slots)); }
-            queries.push(Query::Phrase(ids));
+            let id_start = query_ids.len();
+            for t in line[s..e].split(|&b| b == b' ') { query_ids.push(intern(t, &mut terms, &mut slots)); }
+            queries.push(Query::Phrase(id_start..query_ids.len()));
         }
     }
-    (terms, queries)
+    (terms, queries, query_ids, query_ops)
 }
-#[cfg(target_os = "linux")]
 fn map_file(path: &Path) -> io::Result<(File, *mut u8, usize)> {
     use std::ffi::c_void;
+    // SAFETY: this declaration matches the Linux mmap ABI; the call below uses a live descriptor and checked length.
     unsafe extern "C" {
         fn mmap(addr: *mut c_void, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut c_void;
     }
@@ -264,6 +254,13 @@ fn map_file(path: &Path) -> io::Result<(File, *mut u8, usize)> {
     let p = unsafe { mmap(std::ptr::null_mut(), n, 1, 2, f.as_raw_fd(), 0) };
     if p as isize == -1 { return Err(io::Error::last_os_error()); }
     Ok((f, p.cast(), n))
+}
+fn advise_will_need(address: usize, len: usize) {
+    use std::ffi::c_void;
+    // SAFETY: the declaration matches the Linux madvise ABI; the mapped address is retained by main until this thread joins.
+    unsafe extern "C" { fn madvise(addr: *mut c_void, len: usize, advice: i32) -> i32; }
+    // SAFETY: the address and length describe a live read-only mmap retained by main; MADV_WILLNEED does not modify it.
+    unsafe { let _ = madvise(address as *mut c_void, len, 3); }
 }
 fn merge(a: &[u32], b: &[u32], op: u8) -> Vec<u32> {
     let mut out = Vec::with_capacity(if op == 1 { a.len() + b.len() } else { a.len().min(b.len()) });
@@ -283,7 +280,7 @@ fn merge(a: &[u32], b: &[u32], op: u8) -> Vec<u32> {
 }
 fn as_list(s: Set<'_>, n: usize) -> Vec<u32> {
     match s {
-        Set::List(v) => v,
+        Set::List(v) => v.into_owned(),
         Set::Bits(b) => {
             let mut out = Vec::new();
             for (wi, &w) in b.iter().enumerate() {
@@ -301,7 +298,8 @@ fn as_list(s: Set<'_>, n: usize) -> Vec<u32> {
         }
     }
 }
-fn bitmap_op(a: Set<'_>, b: Set<'_>, op: u8, n: usize) -> Set<'static> {
+#[rustfmt::skip]
+fn bitmap_op<'a>(a: Set<'a>, b: Set<'a>, op: u8, n: usize) -> Set<'a> {
     let words = (n + 63) / 64;
     let aa = match &a {
         Set::Bits(x) => Some(x.as_ref()),
@@ -312,7 +310,8 @@ fn bitmap_op(a: Set<'_>, b: Set<'_>, op: u8, n: usize) -> Set<'static> {
         _ => None,
     };
     if aa.is_none() && bb.is_none() {
-        return Set::List(merge(&as_list(a, n), &as_list(b, n), op));
+        let (Set::List(x), Set::List(y)) = (a, b) else { unreachable!() };
+        return Set::List(Cow::Owned(merge(x.as_ref(), y.as_ref(), op)));
     }
     let mut out = vec![0u64; words];
     match (aa, bb) {
@@ -380,7 +379,7 @@ fn bitmap_op(a: Set<'_>, b: Set<'_>, op: u8, n: usize) -> Set<'static> {
     }
     let count: usize = out.iter().map(|x| x.count_ones() as usize).sum();
     if count < n / 64 {
-        Set::List(as_list(Set::Bits(Cow::Owned(out)), n))
+        Set::List(Cow::Owned(as_list(Set::Bits(Cow::Owned(out)), n)))
     } else {
         Set::Bits(Cow::Owned(out))
     }
@@ -388,12 +387,12 @@ fn bitmap_op(a: Set<'_>, b: Set<'_>, op: u8, n: usize) -> Set<'static> {
 impl Postings {
     fn list(&self, t: usize, terms: &[Term]) -> &[u32] { &self.data[self.starts[t]..self.starts[t] + terms[t].df] }
 }
-fn term_set<'a>(t: usize, terms: &[Term], posts: &Postings, bits: &'a [u64], n: usize) -> Set<'a> {
+fn term_set<'a>(t: usize, terms: &[Term], posts: &'a Postings, bits: &'a [u64], n: usize) -> Set<'a> {
     let x = &terms[t];
     if x.bitmap {
         let w = (n + 63) / 64;
         Set::Bits(Cow::Borrowed(&bits[x.offset..x.offset + w]))
-    } else { Set::List(posts.list(t, terms).to_vec()) }
+    } else { Set::List(Cow::Borrowed(posts.list(t, terms))) }
 }
 fn contains_doc(t: usize, doc: u32, terms: &[Term], posts: &Postings, bits: &[u64]) -> bool {
     let term = &terms[t];
@@ -402,6 +401,7 @@ fn contains_doc(t: usize, doc: u32, terms: &[Term], posts: &Postings, bits: &[u6
     } else { posts.list(t, terms).binary_search(&doc).is_ok() }
 }
 fn same_token(raw: &[u8], term: &[u8]) -> bool { raw.len() == term.len() && raw.iter().zip(term).all(|(&a, &b)| folded(a) == folded(b)) }
+#[rustfmt::skip]
 fn phrase_matches_at(data: &[u8], at: usize, anchor_pos: usize, ids: &[usize], terms: &[Term]) -> bool {
     let anchor = &terms[ids[anchor_pos]].bytes;
     let anchor_end = at + anchor.len();
@@ -440,7 +440,6 @@ fn phrase_matches_at(data: &[u8], at: usize, anchor_pos: usize, ids: &[usize], t
     }
     true
 }
-#[cfg(target_feature = "avx2")]
 fn anchor_mask32(bytes: &[u8], first: u8) -> u32 {
     use std::arch::x86_64::*;
     // SAFETY: caller supplies 32 readable bytes and the build enables AVX2.
@@ -455,6 +454,7 @@ fn anchor_mask32(bytes: &[u8], first: u8) -> u32 {
         _mm256_movemask_epi8(_mm256_cmpeq_epi8(compared, _mm256_set1_epi8(first as i8))) as u32
     }
 }
+#[rustfmt::skip]
 pub fn phrase_in_doc(data: &[u8], ids: &[usize], anchor: usize, terms: &[Term]) -> bool {
     let first = folded(terms[anchor].bytes[0]);
     let mut anchor_positions = [0usize; 8];
@@ -467,7 +467,6 @@ pub fn phrase_in_doc(data: &[u8], ids: &[usize], anchor: usize, terms: &[Term]) 
     }
     let mut base = 0;
     while base < data.len() {
-        #[cfg(target_feature = "avx2")]
         if base + 32 <= data.len() {
             let mut candidates = anchor_mask32(&data[base..base + 32], first);
             while candidates != 0 {
@@ -493,6 +492,12 @@ pub fn phrase_in_doc(data: &[u8], ids: &[usize], anchor: usize, terms: &[Term]) 
     }
     false
 }
+fn push_decimal(out: &mut Vec<u8>, mut value: u64) {
+    let mut buf = [0u8; 20]; let mut p = buf.len();
+    loop { p -= 1; buf[p] = b'0' + (value % 10) as u8; value /= 10; if value == 0 { break; } }
+    out.extend_from_slice(&buf[p..]);
+}
+#[rustfmt::skip]
 fn output_set(s: Set<'_>, n: usize, out: &mut Vec<u8>) {
     let (count, sum, first) = match s {
         Set::List(v) => {
@@ -520,10 +525,8 @@ fn output_set(s: Set<'_>, n: usize, out: &mut Vec<u8>) {
             (count, sum, first)
         }
     };
-    write!(out, "{count} {sum}").unwrap();
-    for id in first {
-        write!(out, " {id}").unwrap();
-    }
+    push_decimal(out, count as u64); out.push(b' '); push_decimal(out, sum);
+    for id in first { out.push(b' '); push_decimal(out, id as u64); }
     out.push(b'\n');
 }
 fn document_id(line: &[u8]) -> (usize, usize) {
@@ -532,15 +535,16 @@ fn document_id(line: &[u8]) -> (usize, usize) {
     while tab < line.len() && line[tab] != b'\t' { id = id * 10 + (line[tab] - b'0') as usize; tab += 1; }
     (id, tab)
 }
+fn decimal_digits(mut id: usize) -> usize { let mut n = 1; while id >= 10 { id /= 10; n += 1; } n }
 fn doc_count(docs: &[u8]) -> usize {
     if docs.is_empty() { return 0; }
     let end = docs.len() - usize::from(docs.last() == Some(&b'\n'));
     let start = docs[..end].iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
     document_id(&docs[start..end]).0 + 1
 }
+#[rustfmt::skip]
 fn sample_hot(docs: &[u8], terms: &[Term], table: &ScanTable) -> Vec<usize> {
     let mut counts = vec![0u32; terms.len()];
-    let mut last = vec![u32::MAX; terms.len()];
     let size = 85 * 1024;
     let ranges: Vec<_> = if docs.len() <= size * 12 {
         vec![(0, docs.len())]
@@ -562,23 +566,30 @@ fn sample_hot(docs: &[u8], terms: &[Term], table: &ScanTable) -> Vec<usize> {
             })
             .collect()
     };
-    for (s, e) in ranges {
-        let mut p = s;
-        while p < e {
-            let end = docs[p..e].iter().position(|&b| b == b'\n').map_or(e, |x| p + x);
-            let line = &docs[p..end];
-            let id = document_id(line).0 as u32;
-            scan_document_tokens(line, |tok| {
-                if let Some(t) = lookup(terms, table, tok) {
-                    if last[t] != id {
-                        last[t] = id;
-                        counts[t] += 1;
+    let local_counts: Vec<Vec<u32>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ranges.iter().map(|&(s, e)| scope.spawn(move || {
+            let mut local_counts = vec![0u32; terms.len()];
+            let mut local_last = vec![u32::MAX; terms.len()];
+            let (mut starts, mut ends) = (Vec::new(), Vec::new());
+            let mut p = s;
+            while p < e {
+                let end = docs[p..e].iter().position(|&b| b == b'\n').map_or(e, |x| p + x);
+                let line = &docs[p..end]; let id = document_id(line).0 as u32;
+                if let Some(tab) = line.iter().position(|&b| b == b'\t') {
+                    let text = &line[tab + 1..]; token_positions(text, &mut starts, &mut ends);
+                    for (&a, &b) in starts.iter().zip(&ends) {
+                        if let Some(t) = lookup(terms, table, &text[a as usize..b as usize]) {
+                            if local_last[t] != id { local_last[t] = id; local_counts[t] += 1; }
+                        }
                     }
                 }
-            });
-            p = end + 1;
-        }
-    }
+                p = end + 1;
+            }
+            local_counts
+        })).collect();
+        handles.into_iter().map(|h| h.join().expect("hot sample worker panicked")).collect()
+    });
+    for local in local_counts { for (total, count) in counts.iter_mut().zip(local) { *total += count; } }
     let mut ids: Vec<_> = (0..terms.len()).filter(|&t| counts[t] >= 2 && terms[t].bytes.len() <= 16).collect();
     ids.sort_unstable_by_key(|&t| (std::cmp::Reverse(counts[t]), t));
     ids.truncate(1024);
@@ -589,6 +600,7 @@ struct WorkerScan {
     pairs: Vec<(u32, u32)>,
     rows: usize,
 }
+#[rustfmt::skip]
 fn scan_onepass(
     docs: &[u8],
     start: usize,
@@ -600,10 +612,11 @@ fn scan_onepass(
     hot_len: usize,
     words: usize,
     bits: &[AtomicU64],
-    text_ptr: usize,
+    line_ptr: usize,
 ) -> WorkerScan {
-    let (mut last, mut counts) = (vec![u32::MAX; terms.len()], vec![0u32; terms.len()]);
+    let mut state = vec![(u32::MAX, 0u32); terms.len()];
     let mut hot_last = vec![u32::MAX; hot_len];
+    let (mut starts, mut ends, mut keys) = (Vec::new(), Vec::new(), Vec::new());
     // Reserve about one pair per 24 source bytes, matching the observed cold-hit density.
     let mut pairs = Vec::with_capacity((end - start) / 24);
     let (mut pos, mut rows) = (start, 0);
@@ -614,15 +627,25 @@ fn scan_onepass(
         let id = raw_id as u32;
         // SAFETY: dense document IDs are unique and each worker owns a disjoint newline-aligned range.
         unsafe {
-            (text_ptr as *mut u32).add(id as usize).write((pos + tab + 1) as u32);
+            (line_ptr as *mut u32).add(id as usize).write(pos as u32);
         }
-        scan_document_tokens(line, |tok| {
-            if let Some(h) = hot.lookup(tok) {
+        let text = &line[tab + 1..];
+        token_positions(text, &mut starts, &mut ends);
+        keys.clear();
+        for (&s, &e) in starts.iter().zip(&ends) { keys.push(scan_key(&text[s as usize..e as usize])); }
+        for i in 0..keys.len() {
+            let s = starts[i] as usize; let e = ends[i] as usize; let raw = &text[s..e]; let key = keys[i];
+            if i + 12 < keys.len() {
+                let prefetch = keys[i + 12].hash as usize & (table.tags.len() - 1);
+                // SAFETY: prefetch points to a valid tag in the live table; the intrinsic does not dereference it in Rust.
+                unsafe { std::arch::x86_64::_mm_prefetch(table.tags.as_ptr().add(prefetch).cast(), std::arch::x86_64::_MM_HINT_T0); }
+            }
+            if let Some(h) = hot.lookup_key(key, raw.len()) {
                 if hot_last[h] != id {
                     hot_last[h] = id;
                     bits[h * words + id as usize / 64].fetch_or(1 << (id % 64), Ordering::Relaxed);
                 }
-            } else if let Some(t) = lookup(terms, table, tok) {
+            } else if let Some(t) = lookup_key(terms, table, key, raw.len(), raw) {
                 let h = term_hot[t];
                 if h != u16::MAX {
                     let h = h as usize;
@@ -630,40 +653,59 @@ fn scan_onepass(
                         hot_last[h] = id;
                         bits[h * words + id as usize / 64].fetch_or(1 << (id % 64), Ordering::Relaxed);
                     }
-                } else if last[t] != id {
-                    last[t] = id;
-                    counts[t] += 1;
+                } else if state[t].0 != id {
+                    state[t].0 = id;
+                    state[t].1 += 1;
                     pairs.push((t as u32, id));
                 }
             }
-        });
+        }
         rows += 1;
         pos = end_line + 1;
     }
-    // Group each worker's sequential pair buffer by term and document so scatter writes are contiguous and sorted.
-    pairs.sort_unstable_by_key(|&(t, id)| ((t as u64) << 32) | id as u64);
+    let counts = state.into_iter().map(|x| x.1).collect();
     WorkerScan { counts, pairs, rows }
 }
+#[rustfmt::skip]
+fn radix_sort_pairs(pairs: &mut Vec<(u32, u32)>) {
+    let mut scratch = vec![(0u32, 0u32); pairs.len()];
+    for shift in [0, 16] {
+        let mut offsets = vec![0usize; 1 << 16];
+        for &(term, _) in pairs.iter() { offsets[((term >> shift) & 0xffff) as usize] += 1; }
+        let mut next = 0;
+        for count in &mut offsets { let n = *count; *count = next; next += n; }
+        for &pair in pairs.iter() {
+            let term = pair.0;
+            let slot = &mut offsets[((term >> shift) & 0xffff) as usize];
+            scratch[*slot] = pair; *slot += 1;
+        }
+        std::mem::swap(pairs, &mut scratch);
+    }
+}
+#[rustfmt::skip]
 fn eval_query(
     q: &Query,
+    query_ids: &[usize],
+    query_ops: &[u8],
     terms: &[Term],
-    _table: &ScanTable,
     posts: &Postings,
     bits: &[u64],
     docs: &[u8],
-    text_starts: &[u32],
+    line_starts: &[u32],
     n: usize,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
     match q {
-        Query::Bool(ids, ops) => {
+        Query::Bool(id_range, op_range) => {
+            let ids = &query_ids[id_range.clone()]; let ops = &query_ops[op_range.clone()];
             let mut r = term_set(ids[0], terms, posts, bits, n);
             for (i, &t) in ids.iter().enumerate().skip(1) {
                 r = bitmap_op(r, term_set(t, terms, posts, bits, n), ops[i - 1], n);
             }
             output_set(r, n, &mut out);
         }
-        Query::Phrase(ids) => {
+        Query::Phrase(range) => {
+            let ids = &query_ids[range.clone()];
             let mut ordered = [0usize; 8];
             ordered[..ids.len()].copy_from_slice(ids);
             ordered[..ids.len()].sort_unstable_by_key(|&t| terms[t].df);
@@ -681,17 +723,17 @@ fn eval_query(
                 if ordered[1..order_len].iter().any(|&t| !contains_doc(t, d, terms, posts, bits)) {
                     continue;
                 }
-                let start = text_starts[d as usize] as usize;
-                let end = docs[start..].iter().position(|&b| b == b'\n').map_or(docs.len(), |offset| start + offset);
+                let line_start = line_starts[d as usize] as usize;
+                let next_line = line_starts[d as usize + 1] as usize;
+                let start = line_start + decimal_digits(d as usize) + 1;
+                let end = next_line - usize::from(next_line > line_start && docs[next_line - 1] == b'\n');
                 if phrase_in_doc(&docs[start..end], ids, anchor, terms) {
                     found.push(d);
                 }
             }
             let sum: u64 = found.iter().map(|&x| x as u64).sum();
-            write!(out, "{} {sum}", found.len()).unwrap();
-            for id in found.iter().take(10) {
-                write!(out, " {id}").unwrap();
-            }
+            push_decimal(&mut out, found.len() as u64); out.push(b' '); push_decimal(&mut out, sum);
+            for id in found.iter().take(10) { out.push(b' '); push_decimal(&mut out, *id as u64); }
             out.push(b'\n');
         }
     }
@@ -703,17 +745,21 @@ fn main() -> io::Result<()> {
     macro_rules! tick { ($i:expr) => { if timing { phases[$i] = lap.elapsed().as_micros(); lap = Instant::now(); } }; }
     let args: Vec<String> = std::env::args().collect();
     let root = args.get(1).map_or("/data", String::as_str); let output = args.get(2).map_or("/out", String::as_str);
-    let qdata = std::fs::read(format!("{root}/queries.txt"))?; let (mut terms, queries) = parse_queries(&qdata);
     let (_file, ptr, len) = map_file(Path::new(&format!("{root}/docs.txt")))?;
     // SAFETY: the read-only slice covers the live mmap and does not outlive it.
     let docs = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let mapping = ptr as usize;
+    let advise = std::thread::spawn(move || advise_will_need(mapping, len));
+    let read_start = Instant::now(); let qdata = std::fs::read(format!("{root}/queries.txt"))?; let query_read = read_start.elapsed().as_micros();
+    let parse_start = Instant::now(); let (mut terms, queries, query_ids, query_ops) = parse_queries(&qdata); let query_parse = parse_start.elapsed().as_micros();
+    advise.join().expect("madvise worker panicked");
     tick!(0); let table = ScanTable::new(&terms); let hot_ids = sample_hot(docs, &terms, &table); tick!(1);
     let n = doc_count(docs);
     let mut term_hot = vec![u16::MAX; terms.len()];
     for (h, &t) in hot_ids.iter().enumerate() { term_hot[t] = h as u16; terms[t].bitmap = true; terms[t].offset = h * n.div_ceil(64); }
     let words = n.div_ceil(64); let hot_len = hot_ids.len();
-    let bitmaps: Vec<_> = (0..hot_len * words).map(|_| AtomicU64::new(0)).collect();
-    let mut text_starts = vec![0u32; n]; let text_ptr = text_starts.as_mut_ptr() as usize;
+    let bitmap_words = vec![0u64; hot_len * words];
+    let mut line_starts = vec![0u32; n + 1]; let line_ptr = line_starts.as_mut_ptr() as usize;
     let workers = std::thread::available_parallelism().map_or(1, usize::from).min(12);
     let mut boundaries = vec![0usize];
     for i in 1..workers {
@@ -724,19 +770,27 @@ fn main() -> io::Result<()> {
     boundaries.push(len); let chunks: Vec<_> = boundaries.windows(2).map(|w| (w[0], w[1])).collect();
     let hot_tables = vec![HotTable::new(&terms, &hot_ids); chunks.len()];
     tick!(3); if timing { phases[2] = 0; }
-    let scans: Vec<WorkerScan> = std::thread::scope(|scope| {
-        let handles: Vec<_> = chunks.iter().enumerate().map(|(w, &(s, e))| {
-            let (ts, st, ht, th, bm) = (&terms, &table, &hot_tables[w], &term_hot, &bitmaps);
-            scope.spawn(move || scan_onepass(docs, s, e, ts, st, ht, th, hot_len, words, bm, text_ptr))
-        }).collect();
-        handles.into_iter().map(|h| h.join().expect("one-pass worker panicked")).collect()
-    });
-    debug_assert_eq!(scans.iter().map(|x| x.rows).sum::<usize>(), n);
-    for (t, term) in terms.iter_mut().enumerate() {
-        term.df = if term.bitmap {
-            bitmaps[term.offset..term.offset + words].iter().map(|x| x.load(Ordering::Relaxed).count_ones() as usize).sum()
-        } else { scans.iter().map(|x| x.counts[t] as usize).sum() };
-    }
+    let mut scans: Vec<WorkerScan> = {
+        // SAFETY: AtomicU64 has the same size and alignment as u64; this zeroed storage is only accessed atomically until workers join.
+        let bitmaps = unsafe { std::slice::from_raw_parts(bitmap_words.as_ptr().cast::<AtomicU64>(), bitmap_words.len()) };
+        let scans: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = chunks.iter().enumerate().map(|(w, &(s, e))| {
+                let (ts, st, ht, th, bm) = (&terms, &table, &hot_tables[w], &term_hot, bitmaps);
+                scope.spawn(move || scan_onepass(docs, s, e, ts, st, ht, th, hot_len, words, bm, line_ptr))
+            }).collect();
+            handles.into_iter().map(|h| h.join().expect("one-pass worker panicked")).collect()
+        });
+        debug_assert_eq!(scans.iter().map(|x| x.rows).sum::<usize>(), n);
+    line_starts[n] = len as u32;
+        for (t, term) in terms.iter_mut().enumerate() {
+            term.df = if term.bitmap {
+                bitmaps[term.offset..term.offset + words].iter().map(|x| x.load(Ordering::Relaxed).count_ones() as usize).sum()
+            } else { scans.iter().map(|x| x.counts[t] as usize).sum() };
+        }
+        scans
+    };
+    // Sort workers one at a time so the temporary radix arrays do not multiply peak RSS by the worker count.
+    for scan in &mut scans { radix_sort_pairs(&mut scan.pairs); }
     let mut starts = vec![0u32; terms.len()]; let mut total_posts = 0u32;
     for (t, term) in terms.iter().enumerate() { if !term.bitmap { starts[t] = total_posts; total_posts += term.df as u32; } }
     let terms_len = terms.len(); let mut off = vec![0u32; chunks.len() * terms_len];
@@ -763,17 +817,16 @@ fn main() -> io::Result<()> {
     });
     drop(scans); tick!(4);
     let postings = Postings { data, starts: starts.into_iter().map(|x| x as usize).collect() };
-    // SAFETY: AtomicU64 and u64 have identical layout; all atomic writers have joined.
-    let bits = unsafe { std::slice::from_raw_parts(bitmaps.as_ptr().cast::<u64>(), bitmaps.len()) };
+    let bits = &bitmap_words[..];
     let next = AtomicUsize::new(0); const BLOCK: usize = 64; let qlen = queries.len();
     let out = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers.min(qlen.max(1))).map(|_| {
-            let (ts, st, ps, bm, starts) = (&terms, &table, &postings, bits, &text_starts); let next = &next; let qs = &queries;
+            let (ts, qi, qo, ps, bm, starts) = (&terms, &query_ids, &query_ops, &postings, bits, &line_starts); let next = &next; let qs = &queries;
             scope.spawn(move || {
                 let mut blocks = Vec::new(); loop {
                     let s = next.fetch_add(BLOCK, Ordering::Relaxed); if s >= qlen { break; }
                     let mut part = Vec::new();
-                    for q in &qs[s..(s + BLOCK).min(qlen)] { part.extend_from_slice(&eval_query(q, ts, st, ps, bm, docs, starts, n)); }
+                    for q in &qs[s..(s + BLOCK).min(qlen)] { part.extend_from_slice(&eval_query(q, qi, qo, ts, ps, bm, docs, starts, n)); }
                     blocks.push((s / BLOCK, part));
                 } blocks
             })
@@ -782,6 +835,6 @@ fn main() -> io::Result<()> {
         blocks.sort_unstable_by_key(|x| x.0); blocks.into_iter().flat_map(|x| x.1).collect::<Vec<u8>>()
     });
     tick!(5); std::fs::create_dir_all(output)?; std::fs::write(Path::new(output).join("results.txt"), out)?;
-    if timing { phases[6] = lap.elapsed().as_micros(); let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find_map(|l| l.strip_prefix("RssAnon:")?.trim().split_whitespace().next()?.parse::<u64>().ok())).unwrap_or(0); eprintln!("SD_TIMING parse={} table={} scan_a={} setup={} scan_b={} queries={} output={} total={} rss_anon_kb={}", phases[0], phases[1], phases[2], phases[3], phases[4], phases[5], phases[6], total.elapsed().as_micros(), rss); }
+    if timing { phases[6] = lap.elapsed().as_micros(); let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find_map(|l| l.strip_prefix("RssAnon:")?.trim().split_whitespace().next()?.parse::<u64>().ok())).unwrap_or(0); eprintln!("SD_TIMING read={} query_parse={} parse={} table={} scan_a={} setup={} scan_b={} queries={} output={} total={} rss_anon_kb={}", query_read, query_parse, phases[0], phases[1], phases[2], phases[3], phases[4], phases[5], phases[6], total.elapsed().as_micros(), rss); }
     std::process::exit(0)
 }
