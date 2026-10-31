@@ -12,7 +12,11 @@ struct FastHasher(u64);
 
 impl Hasher for FastHasher {
     fn write(&mut self, bytes: &[u8]) {
-        let mut h = if self.0 == 0 { 0xcbf29ce484222325 } else { self.0 };
+        let mut h = if self.0 == 0 {
+            0xcbf29ce484222325
+        } else {
+            self.0
+        };
         for &b in bytes {
             h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
         }
@@ -36,7 +40,13 @@ struct Group {
 
 impl Group {
     fn new() -> Self {
-        Self { latencies: Vec::new(), errors: 0, p50: 0, p95: 0, p99: 0 }
+        Self {
+            latencies: Vec::new(),
+            errors: 0,
+            p50: 0,
+            p95: 0,
+            p99: 0,
+        }
     }
 }
 
@@ -48,7 +58,11 @@ struct Local {
 
 impl Local {
     fn new() -> Self {
-        Self { endpoints: Vec::new(), endpoint_ids: FastMap::default(), groups: FastMap::default() }
+        Self {
+            endpoints: Vec::new(),
+            endpoint_ids: FastMap::default(),
+            groups: FastMap::default(),
+        }
     }
 
     fn endpoint_id(&mut self, bytes: &[u8]) -> usize {
@@ -78,58 +92,89 @@ fn hour_index(ts: &[u8]) -> usize {
 }
 
 fn parse_uint(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0u32, |n, &b| n * 10 + u32::from(b - b'0'))
+    bytes
+        .iter()
+        .fold(0u32, |n, &b| n * 10 + u32::from(b - b'0'))
 }
 
-fn parse_range(data: &[u8], mut pos: usize, end: usize) -> Local {
+fn parse_range(data: &[u8], start: usize, end: usize) -> Local {
     let mut local = Local::new();
-    while pos < end {
-        let line_end = data[pos..end].iter().position(|&b| b == b'\n').map_or(end, |n| pos + n);
-        let line = &data[pos..line_end];
+    let mut pos = start;
+    parse_into(data, &mut pos, end, &mut local);
+    assert_eq!(pos, end);
+    local
+}
+
+fn parse_into(data: &[u8], pos: &mut usize, end: usize, local: &mut Local) {
+    while *pos < end {
+        let line_end = data[*pos..end]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(end, |n| *pos + n);
+        let line = &data[*pos..line_end];
 
         // The timestamp has fixed width; only the date and hour bytes are needed.
         let mut field = 28;
-        while line[field] != b' ' { field += 1; }
+        while line[field] != b' ' {
+            field += 1;
+        }
         let endpoint_start = field + 1;
-        let endpoint_end = endpoint_start + line[endpoint_start..].iter().position(|&b| b == b' ').unwrap();
+        let endpoint_end = endpoint_start
+            + line[endpoint_start..]
+                .iter()
+                .position(|&b| b == b' ')
+                .unwrap();
         let status_start = endpoint_end + 1;
         let latency_start = status_start + 4;
         let endpoint = &line[endpoint_start..endpoint_end];
         let hour = hour_index(line);
         let endpoint_id = local.endpoint_id(endpoint);
-        let group = local.groups.entry((hour as u8, endpoint_id)).or_insert_with(Group::new);
+        let group = local
+            .groups
+            .entry((hour as u8, endpoint_id))
+            .or_insert_with(Group::new);
         group.latencies.push(parse_uint(&line[latency_start..]));
         if line[status_start] == b'5' {
             group.errors += 1;
         }
-        pos = line_end + 1;
+        *pos = line_end + 1;
     }
-    local
 }
 
-#[cfg(unix)]
 struct Mapping {
     ptr: *mut u8,
     len: usize,
 }
 
-#[cfg(unix)]
 impl Mapping {
     fn open(path: &Path) -> Self {
         use std::os::unix::io::AsRawFd;
         let file = std::fs::File::open(path).expect("open input");
         let len = file.metadata().expect("input metadata").len() as usize;
         if len == 0 {
-            return Self { ptr: std::ptr::NonNull::<u8>::dangling().as_ptr(), len };
+            return Self {
+                ptr: std::ptr::NonNull::<u8>::dangling().as_ptr(),
+                len,
+            };
         }
         unsafe extern "C" {
-            fn mmap(addr: *mut std::ffi::c_void, length: usize, prot: i32, flags: i32, fd: i32, offset: isize) -> *mut std::ffi::c_void;
+            fn mmap(
+                addr: *mut std::ffi::c_void,
+                length: usize,
+                prot: i32,
+                flags: i32,
+                fd: i32,
+                offset: isize,
+            ) -> *mut std::ffi::c_void;
         }
         // SAFETY: the read-only mapping remains valid after the descriptor closes, and the
         // returned pointer is checked against MAP_FAILED before it is accessed.
         let ptr = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, file.as_raw_fd(), 0) };
         assert_ne!(ptr as isize, -1, "mmap input");
-        Self { ptr: ptr.cast(), len }
+        Self {
+            ptr: ptr.cast(),
+            len,
+        }
     }
 
     fn bytes(&self) -> &[u8] {
@@ -138,84 +183,39 @@ impl Mapping {
     }
 }
 
-#[cfg(unix)]
 impl Drop for Mapping {
     fn drop(&mut self) {
-        unsafe extern "C" { fn munmap(addr: *mut std::ffi::c_void, length: usize) -> i32; }
+        unsafe extern "C" {
+            fn munmap(addr: *mut std::ffi::c_void, length: usize) -> i32;
+        }
         // SAFETY: this is the unchanged address and length returned by mmap.
         if self.len != 0 {
             // SAFETY: this is the unchanged address and length returned by mmap.
-            unsafe { munmap(self.ptr.cast(), self.len); }
+            unsafe {
+                munmap(self.ptr.cast(), self.len);
+            }
         }
     }
 }
-
-#[cfg(windows)]
-struct Mapping {
-    ptr: *mut u8,
-    len: usize,
-    mapping: std::os::windows::io::RawHandle,
-}
-
-#[cfg(windows)]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn CreateFileMappingW(file: std::os::windows::io::RawHandle, attrs: *mut std::ffi::c_void,
-        protect: u32, max_high: u32, max_low: u32, name: *const u16) -> std::os::windows::io::RawHandle;
-    fn MapViewOfFile(mapping: std::os::windows::io::RawHandle, access: u32, offset_high: u32,
-        offset_low: u32, bytes: usize) -> *mut std::ffi::c_void;
-    fn UnmapViewOfFile(address: *const std::ffi::c_void) -> i32;
-    fn CloseHandle(handle: std::os::windows::io::RawHandle) -> i32;
-}
-
-#[cfg(windows)]
-impl Mapping {
-    fn open(path: &Path) -> Self {
-        use std::os::windows::io::AsRawHandle;
-        let file = std::fs::File::open(path).expect("open input");
-        let len = file.metadata().expect("input metadata").len() as usize;
-        if len == 0 {
-            return Self { ptr: std::ptr::NonNull::<u8>::dangling().as_ptr(), len, mapping: std::ptr::null_mut() };
-        }
-        // SAFETY: `file` is a valid open handle and the mapping is requested read-only.
-        let mapping = unsafe { CreateFileMappingW(file.as_raw_handle(), std::ptr::null_mut(), 2, 0, 0, std::ptr::null()) };
-        assert!(!mapping.is_null(), "CreateFileMappingW input");
-        // SAFETY: `mapping` is a live handle returned above; offset zero and size zero map the file.
-        let ptr = unsafe { MapViewOfFile(mapping, 4, 0, 0, 0) };
-        assert!(!ptr.is_null(), "MapViewOfFile input");
-        Self { ptr: ptr.cast(), len, mapping }
-    }
-
-    fn bytes(&self) -> &[u8] {
-        // SAFETY: MapViewOfFile exposes the complete read-only file view for this lifetime.
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
-    }
-}
-
-#[cfg(windows)]
-impl Drop for Mapping {
-    fn drop(&mut self) {
-        if self.len != 0 {
-            // SAFETY: these are the view and mapping handle returned by the Windows APIs.
-            unsafe { UnmapViewOfFile(self.ptr.cast()); CloseHandle(self.mapping); }
-        }
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-compile_error!("the solution requires a Unix or Windows memory mapping API");
 
 fn hour_strings() -> Vec<[u8; 20]> {
-    (0..HOURS).map(|idx| {
-        let absolute = idx + 18;
-        let day = absolute / 24;
-        let hour = absolute % 24;
-        let (month, date) = match day { 0 => (10, 30), 1 => (10, 31), 2 => (11, 1), _ => (11, 2) };
-        let mut out = [0u8; 20];
-        let value = format!("2026-{month:02}-{date:02}T{hour:02}:00:00Z");
-        out.copy_from_slice(value.as_bytes());
-        out
-    }).collect()
+    (0..HOURS)
+        .map(|idx| {
+            let absolute = idx + 18;
+            let day = absolute / 24;
+            let hour = absolute % 24;
+            let (month, date) = match day {
+                0 => (10, 30),
+                1 => (10, 31),
+                2 => (11, 1),
+                _ => (11, 2),
+            };
+            let mut out = [0u8; 20];
+            let value = format!("2026-{month:02}-{date:02}T{hour:02}:00:00Z");
+            out.copy_from_slice(value.as_bytes());
+            out
+        })
+        .collect()
 }
 
 fn push_uint(out: &mut Vec<u8>, mut n: u64) {
@@ -225,7 +225,9 @@ fn push_uint(out: &mut Vec<u8>, mut n: u64) {
         at -= 1;
         digits[at] = b'0' + (n % 10) as u8;
         n /= 10;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
     }
     out.extend_from_slice(&digits[at..]);
 }
@@ -240,12 +242,17 @@ fn main() {
         .map_or_else(|| "/out/summary.txt".into(), |s| s.into());
     let mapping = Mapping::open(Path::new(&input));
     let data = mapping.bytes();
-    let workers = thread::available_parallelism().map_or(1, usize::from).min(MAX_THREADS).min(data.len().max(1));
+    let workers = thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(MAX_THREADS)
+        .min(data.len().max(1));
     let mut bounds = Vec::with_capacity(workers + 1);
     bounds.push(0);
     for i in 1..workers {
         let mut p = data.len() * i / workers;
-        while p < data.len() && data[p - 1] != b'\n' { p += 1; }
+        while p < data.len() && data[p - 1] != b'\n' {
+            p += 1;
+        }
         bounds.push(p);
     }
     bounds.push(data.len());
@@ -256,7 +263,10 @@ fn main() {
             let (start, end) = (pair[0], pair[1]);
             joins.push(scope.spawn(move || parse_range(data, start, end)));
         }
-        joins.into_iter().map(|j| j.join().expect("parser thread panicked")).collect::<Vec<_>>()
+        joins
+            .into_iter()
+            .map(|j| j.join().expect("parser thread panicked"))
+            .collect::<Vec<_>>()
     });
 
     let mut global_ids: FastMap<Vec<u8>, usize> = FastMap::default();
@@ -265,7 +275,9 @@ fn main() {
     for mut local in locals {
         let mut remap = Vec::with_capacity(local.endpoints.len());
         for endpoint in local.endpoints.drain(..) {
-            let id = if let Some(&id) = global_ids.get(endpoint.as_slice()) { id } else {
+            let id = if let Some(&id) = global_ids.get(endpoint.as_slice()) {
+                id
+            } else {
                 let id = endpoints.len();
                 global_ids.insert(endpoint.clone(), id);
                 endpoints.push(endpoint);
@@ -304,22 +316,31 @@ fn main() {
     for hour in 0..HOURS {
         for &endpoint in &order {
             let group = &groups[endpoint * HOURS + hour];
-            if group.latencies.is_empty() { continue; }
+            if group.latencies.is_empty() {
+                continue;
+            }
             out.extend_from_slice(&hours[hour]);
             out.push(b' ');
             out.extend_from_slice(&endpoints[endpoint]);
             out.push(b' ');
             let count = group.latencies.len() as u64;
             push_uint(&mut out, count);
-            out.push(b' '); push_uint(&mut out, u64::from(group.p50));
-            out.push(b' '); push_uint(&mut out, u64::from(group.p95));
-            out.push(b' '); push_uint(&mut out, u64::from(group.p99));
-            out.push(b' '); push_uint(&mut out, u64::from(group.errors));
-            out.push(b' '); push_uint(&mut out, u64::from(group.errors) * 1_000_000 / count);
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.p50));
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.p95));
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.p99));
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.errors));
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.errors) * 1_000_000 / count);
             out.push(b'\n');
         }
     }
-    if let Some(parent) = Path::new(&output).parent() { std::fs::create_dir_all(parent).expect("create output directory"); }
+    if let Some(parent) = Path::new(&output).parent() {
+        std::fs::create_dir_all(parent).expect("create output directory");
+    }
     std::fs::write(output, out).expect("write summary");
     drop(mapping);
     std::process::exit(0);

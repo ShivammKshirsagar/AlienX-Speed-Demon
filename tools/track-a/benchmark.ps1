@@ -1,60 +1,41 @@
 param(
-    [string]$Solution = ".\track-a\target\release\solution.exe",
-    [string]$Data = ".\data\a\requests.log",
+    [string]$Image = "speeddemon-check/track-a",
+    [string]$Data = ".\data\a",
+    [string]$Output = ".\.out\track-a",
     [int]$Repeats = 5
 )
 
-$solutionPath = (Resolve-Path -LiteralPath $Solution).Path
 $dataPath = (Resolve-Path -LiteralPath $Data).Path
-$outputPath = Join-Path (Resolve-Path -LiteralPath ".\tools\track-a").Path "bench-summary.txt"
-$referencePath = (Resolve-Path -LiteralPath "C:\GitHub Desktop\speed-demon-2026\reference\a_ingest.py").Path
-$referenceOut = Join-Path (Resolve-Path -LiteralPath ".\tools\track-a").Path "bench-reference"
-$null = New-Item -ItemType Directory -Force -Path $referenceOut
+$outputPath = (Resolve-Path -LiteralPath $Output).Path
+$expected = "495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3"
 $times = [System.Collections.Generic.List[double]]::new()
-$peaks = [System.Collections.Generic.List[double]]::new()
-
-$baseline = [System.Diagnostics.Process]::new()
-$baseline.StartInfo.FileName = "python"
-$baseline.StartInfo.UseShellExecute = $false
-$baseline.StartInfo.Arguments = '"' + $referencePath + '" --data "' + (Split-Path -Parent $dataPath) + '" --out "' + $referenceOut + '"'
-$baselineWatch = [System.Diagnostics.Stopwatch]::StartNew()
-[void]$baseline.Start()
-$baselinePeak = 0L
-while (-not $baseline.HasExited) {
-    $baseline.Refresh()
-    if ($baseline.WorkingSet64 -gt $baselinePeak) { $baselinePeak = $baseline.WorkingSet64 }
-    Start-Sleep -Milliseconds 20
-}
-$baseline.Refresh()
-if ($baseline.PeakWorkingSet64 -gt $baselinePeak) { $baselinePeak = $baseline.PeakWorkingSet64 }
-$baselineWatch.Stop()
-if ($baseline.ExitCode -ne 0) { throw "Reference exited $($baseline.ExitCode)" }
-$baselineHash = (Get-FileHash -LiteralPath (Join-Path $referenceOut "summary.txt") -Algorithm SHA256).Hash.ToLowerInvariant()
-Write-Output ("reference: {0:N3} s, {1:N1} MB peak working set, {2}" -f $baselineWatch.Elapsed.TotalSeconds, ($baselinePeak / 1MB), $baselineHash)
+$memories = [System.Collections.Generic.List[double]]::new()
 
 for ($i = 1; $i -le $Repeats; $i++) {
-    $proc = [System.Diagnostics.Process]::new()
-    $proc.StartInfo.FileName = $solutionPath
-    $proc.StartInfo.UseShellExecute = $false
-    $proc.StartInfo.Arguments = '"' + $dataPath + '" "' + $outputPath + '"'
-    $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    [void]$proc.Start()
-    $peak = 0L
-    while (-not $proc.HasExited) {
-        $proc.Refresh()
-        if ($proc.WorkingSet64 -gt $peak) { $peak = $proc.WorkingSet64 }
-        Start-Sleep -Milliseconds 10
-    }
-    $proc.Refresh()
-    if ($proc.PeakWorkingSet64 -gt $peak) { $peak = $proc.PeakWorkingSet64 }
-    $watch.Stop()
-    if ($proc.ExitCode -ne 0) { throw "Run $i exited $($proc.ExitCode)" }
-    $times.Add($watch.Elapsed.TotalSeconds)
-    $peaks.Add($peak / 1MB)
-    $hash = (Get-FileHash -LiteralPath $outputPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    Write-Output ("run {0}: {1:N3} s, {2:N1} MB peak working set, {3}" -f $i, $watch.Elapsed.TotalSeconds, ($peak / 1MB), $hash)
+    $dockerArgs = @(
+        "run", "--rm", "--network=none", "--read-only",
+        "--tmpfs", "/tmp:rw,size=1g,exec", "--memory=8g", "--memory-swap=8g",
+        "--pids-limit=512", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+        "--user", "65534:65534", "--ulimit", "nofile=8192:8192", "--cpuset-cpus=0-11",
+        "-v", "${dataPath}:/data:ro", "-v", "${outputPath}:/out:rw",
+        "--entrypoint", "/out/time-wrapper", $Image
+    )
+    $lines = @(& docker @dockerArgs 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "Docker run $i failed: $($lines -join ' ')" }
+
+    $timeLine = $lines | Where-Object { $_ -match '^process_ns=\d+$' } | Select-Object -Last 1
+    $memoryLine = $lines | Where-Object { $_ -match '^memory_peak_bytes=\d+$' } | Select-Object -Last 1
+    if (-not $timeLine -or -not $memoryLine) { throw "Could not parse timing/memory: $($lines -join ' ')" }
+    $seconds = [double](($timeLine -split '=')[1]) / 1e9
+    $memoryMb = [double](($memoryLine -split '=')[1]) / 1MB
+    $hash = (Get-FileHash -LiteralPath (Join-Path $outputPath "summary.txt") -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($hash -ne $expected) { throw "Hash mismatch on run ${i}: $hash" }
+    $times.Add($seconds)
+    $memories.Add($memoryMb)
+    Write-Output ("run {0}: {1:N2} s process, {2:N1} MB cgroup peak, {3}" -f $i, $seconds, $memoryMb, $hash)
 }
 
 $sortedTimes = @($times | Sort-Object)
-$sortedPeaks = @($peaks | Sort-Object)
-Write-Output ("median: {0:N3} s, {1:N1} MB peak working set" -f $sortedTimes[[int]($Repeats / 2)], $sortedPeaks[[int]($Repeats / 2)])
+$sortedMemories = @($memories | Sort-Object)
+$middle = [int][Math]::Floor($Repeats / 2)
+Write-Output ("median: {0:N2} s process, {1:N1} MB cgroup peak" -f $sortedTimes[$middle], $sortedMemories[$middle])
