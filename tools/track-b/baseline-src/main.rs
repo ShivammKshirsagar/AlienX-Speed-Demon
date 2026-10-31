@@ -1,24 +1,25 @@
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[repr(C)]
-struct Term {
+pub struct Term {
     bytes: Vec<u8>,
     hash: u64,
     df: usize,
     bitmap: bool,
     offset: usize,
 }
-enum Query {
+pub enum Query {
     Bool(Vec<usize>, Vec<u8>),
     Phrase(Vec<usize>),
 }
-enum Set {
+enum Set<'a> {
     List(Vec<u32>),
-    Bits(Vec<u64>),
+    Bits(Cow<'a, [u64]>),
 }
 
 fn folded(x: u8) -> u8 {
@@ -31,28 +32,180 @@ fn folded(x: u8) -> u8 {
 fn is_word(x: u8) -> bool {
     x >= b'a' && x <= b'z' || x >= b'0' && x <= b'9'
 }
+pub fn scan_tokens_scalar<F: FnMut(&[u8])>(data: &[u8], mut visit: F) {
+    let mut p = 0;
+    while p < data.len() {
+        while p < data.len() && !is_word(folded(data[p])) {
+            p += 1;
+        }
+        let start = p;
+        while p < data.len() && is_word(folded(data[p])) {
+            p += 1;
+        }
+        if p > start {
+            visit(&data[start..p]);
+        }
+    }
+}
+pub fn scan_document_tokens<F: FnMut(&[u8])>(line: &[u8], visit: F) {
+    if let Some(tab) = line.iter().position(|&b| b == b'\t') {
+        scan_tokens(&line[tab + 1..], visit);
+    }
+}
+#[cfg(target_feature = "avx2")]
+fn word_mask32(bytes: &[u8]) -> u32 {
+    use std::arch::x86_64::*;
+    // SAFETY: callers pass a slice with at least 32 readable bytes and the build enables AVX2.
+    unsafe {
+        let v = _mm256_loadu_si256(bytes.as_ptr().cast());
+        let lower = _mm256_or_si256(v, _mm256_set1_epi8(0x20));
+        let letters = _mm256_and_si256(
+            _mm256_cmpgt_epi8(lower, _mm256_set1_epi8(0x60)),
+            _mm256_cmpgt_epi8(_mm256_set1_epi8(0x7b), lower),
+        );
+        let digits = _mm256_and_si256(
+            _mm256_cmpgt_epi8(v, _mm256_set1_epi8(0x2f)),
+            _mm256_cmpgt_epi8(_mm256_set1_epi8(0x3a), v),
+        );
+        _mm256_movemask_epi8(_mm256_or_si256(letters, digits)) as u32
+    }
+}
+#[cfg(target_feature = "avx2")]
+pub fn scan_tokens_avx2_chunks<F: FnMut(&[u8])>(data: &[u8], chunk_bytes: usize, mut visit: F) {
+    let chunk_bytes = chunk_bytes.max(1);
+    let mut token_start = None;
+    let mut carry = 0u32;
+    let mut chunk_start = 0usize;
+    while chunk_start < data.len() {
+        let chunk_end = data.len().min(chunk_start.saturating_add(chunk_bytes));
+        let mut base = chunk_start;
+        while base + 32 <= chunk_end {
+            let mask = word_mask32(&data[base..base + 32]);
+            // Starts and ends are bit transitions; carry represents the preceding byte across block boundaries.
+            let mut starts = mask & !((mask << 1) | carry);
+            let mut ends = !mask & ((mask << 1) | carry);
+            while starts != 0 || ends != 0 {
+                let s = starts.trailing_zeros();
+                let e = ends.trailing_zeros();
+                if starts != 0 && (ends == 0 || s < e) {
+                    token_start = Some(base + s as usize);
+                    starts &= starts - 1;
+                } else {
+                    if let Some(start) = token_start.take() {
+                        visit(&data[start..base + e as usize]);
+                    }
+                    ends &= ends - 1;
+                }
+            }
+            carry = mask >> 31;
+            base += 32;
+        }
+        while base < chunk_end {
+            let word = is_word(folded(data[base]));
+            if word {
+                if token_start.is_none() {
+                    token_start = Some(base);
+                }
+            } else if let Some(start) = token_start.take() {
+                visit(&data[start..base]);
+            }
+            carry = u32::from(word);
+            base += 1;
+        }
+        chunk_start = chunk_end;
+    }
+    if let Some(start) = token_start {
+        visit(&data[start..]);
+    }
+}
+pub fn scan_tokens<F: FnMut(&[u8])>(data: &[u8], visit: F) {
+    #[cfg(target_feature = "avx2")]
+    {
+        scan_tokens_avx2_chunks(data, data.len().max(1), visit);
+    }
+    #[cfg(not(target_feature = "avx2"))]
+    {
+        scan_tokens_scalar(data, visit);
+    }
+}
 fn hash_bytes(raw: &[u8]) -> u64 {
     raw.iter().fold(0xcbf29ce484222325, |h, &x| (h ^ folded(x) as u64).wrapping_mul(0x100000001b3))
 }
-fn lookup(terms: &[Term], slots: &[u32], raw: &[u8]) -> Option<usize> {
+#[derive(Clone, Copy, Default)]
+struct ScanSlot {
+    key0: u64,
+    key1: u64,
+    id_plus_one: usize,
+    len: usize,
+}
+struct ScanKey {
+    key0: u64,
+    key1: u64,
+    hash: u64,
+}
+fn folded_word(raw: &[u8], start: usize) -> u64 {
+    let tail = &raw[start..];
+    if tail.len() >= 8 {
+        // SAFETY: at least eight token bytes remain at `start`; unaligned reads are allowed.
+        unsafe { (tail.as_ptr().cast::<u64>().read_unaligned()).to_le() | 0x2020202020202020 }
+    } else {
+        let mut bytes = [0u8; 8];
+        for (dst, &src) in bytes.iter_mut().zip(tail) {
+            *dst = folded(src);
+        }
+        u64::from_le_bytes(bytes)
+    }
+}
+fn scan_key(raw: &[u8]) -> ScanKey {
+    let len = raw.len();
+    if len <= 16 {
+        let key0 = folded_word(raw, 0);
+        let key1 = if len >= 8 { folded_word(raw, len - 8) } else { 0 };
+        let hash = (key0 ^ key1.rotate_left(17) ^ len as u64).wrapping_mul(0x9e3779b185ebca87);
+        ScanKey { key0, key1, hash: hash ^ (hash >> 32) }
+    } else {
+        ScanKey { key0: hash_bytes(raw), key1: 0, hash: hash_bytes(raw) }
+    }
+}
+pub struct ScanTable {
+    slots: Vec<ScanSlot>,
+}
+impl ScanTable {
+    pub fn new(terms: &[Term]) -> Self {
+        let mut capacity = 1usize;
+        while capacity < terms.len().saturating_mul(3).div_ceil(2) {
+            capacity *= 2;
+        }
+        let mut slots = vec![ScanSlot::default(); capacity];
+        for (id, term) in terms.iter().enumerate() {
+            let key = scan_key(&term.bytes);
+            let mut p = key.hash as usize & (capacity - 1);
+            while slots[p].id_plus_one != 0 {
+                p = (p + 1) & (capacity - 1);
+            }
+            slots[p] = ScanSlot { key0: key.key0, key1: key.key1, id_plus_one: id + 1, len: term.bytes.len() };
+        }
+        Self { slots }
+    }
+}
+pub fn lookup(terms: &[Term], table: &ScanTable, raw: &[u8]) -> Option<usize> {
     if raw.is_empty() {
         return None;
     }
-    let h = hash_bytes(raw);
-    let mut p = h as usize & (slots.len() - 1);
+    let key = scan_key(raw);
+    let mut p = key.hash as usize & (table.slots.len() - 1);
     loop {
-        let v = slots[p];
-        if v == 0 {
+        let slot = table.slots[p];
+        if slot.id_plus_one == 0 {
             return None;
         }
-        let t = (v - 1) as usize;
-        if terms[t].hash == h
-            && terms[t].bytes.len() == raw.len()
-            && terms[t].bytes.iter().zip(raw).all(|(&a, &b)| a == folded(b))
-        {
-            return Some(t);
+        if slot.len == raw.len() && slot.key0 == key.key0 && slot.key1 == key.key1 {
+            let id = slot.id_plus_one - 1;
+            if raw.len() <= 16 || terms[id].bytes.iter().zip(raw).all(|(&a, &b)| a == folded(b)) {
+                return Some(id);
+            }
         }
-        p = (p + 1) & (slots.len() - 1);
+        p = (p + 1) & (table.slots.len() - 1);
     }
 }
 fn intern(raw: &[u8], terms: &mut Vec<Term>, slots: &mut Vec<u32>) -> usize {
@@ -73,7 +226,7 @@ fn intern(raw: &[u8], terms: &mut Vec<Term>, slots: &mut Vec<u32>) -> usize {
         p = (p + 1) & (slots.len() - 1);
     }
 }
-fn parse_queries(data: &[u8]) -> (Vec<Term>, Vec<Query>) {
+pub fn parse_queries(data: &[u8]) -> (Vec<Term>, Vec<Query>) {
     let mut cap = 1usize;
     while cap < data.len() / 4 {
         cap *= 2;
@@ -173,7 +326,7 @@ fn merge(a: &[u32], b: &[u32], op: u8) -> Vec<u32> {
     }
     out
 }
-fn as_list(s: Set, n: usize) -> Vec<u32> {
+fn as_list(s: Set<'_>, n: usize) -> Vec<u32> {
     match s {
         Set::List(v) => v,
         Set::Bits(b) => {
@@ -193,14 +346,14 @@ fn as_list(s: Set, n: usize) -> Vec<u32> {
         }
     }
 }
-fn bitmap_op(a: Set, b: Set, op: u8, n: usize) -> Set {
+fn bitmap_op(a: Set<'_>, b: Set<'_>, op: u8, n: usize) -> Set<'static> {
     let words = (n + 63) / 64;
     let aa = match &a {
-        Set::Bits(x) => Some(x.clone()),
+        Set::Bits(x) => Some(x.as_ref()),
         _ => None,
     };
     let bb = match &b {
-        Set::Bits(x) => Some(x.clone()),
+        Set::Bits(x) => Some(x.as_ref()),
         _ => None,
     };
     if aa.is_none() && bb.is_none() {
@@ -272,16 +425,16 @@ fn bitmap_op(a: Set, b: Set, op: u8, n: usize) -> Set {
     }
     let count: usize = out.iter().map(|x| x.count_ones() as usize).sum();
     if count < n / 64 {
-        Set::List(as_list(Set::Bits(out), n))
+        Set::List(as_list(Set::Bits(Cow::Owned(out)), n))
     } else {
-        Set::Bits(out)
+        Set::Bits(Cow::Owned(out))
     }
 }
-fn term_set(t: usize, terms: &[Term], posts: &[Vec<u32>], bits: &[u64], n: usize) -> Set {
+fn term_set<'a>(t: usize, terms: &[Term], posts: &[Vec<u32>], bits: &'a [u64], n: usize) -> Set<'a> {
     let x = &terms[t];
     if x.bitmap {
         let w = (n + 63) / 64;
-        Set::Bits(bits[x.offset..x.offset + w].to_vec())
+        Set::Bits(Cow::Borrowed(&bits[x.offset..x.offset + w]))
     } else {
         Set::List(posts[t].clone())
     }
@@ -294,16 +447,101 @@ fn contains_doc(t: usize, doc: u32, terms: &[Term], posts: &[Vec<u32>], bits: &[
         posts[t].binary_search(&doc).is_ok()
     }
 }
-fn phrase_token_id(ids: &[usize], terms: &[Term], raw: &[u8]) -> usize {
-    for &id in ids {
-        let token = &terms[id].bytes;
-        if token.len() == raw.len() && token.iter().zip(raw).all(|(&a, &b)| a == folded(b)) {
-            return id;
+fn same_token(raw: &[u8], term: &[u8]) -> bool {
+    raw.len() == term.len() && raw.iter().zip(term).all(|(&a, &b)| folded(a) == folded(b))
+}
+fn phrase_matches_at(data: &[u8], at: usize, anchor_pos: usize, ids: &[usize], terms: &[Term]) -> bool {
+    let anchor = &terms[ids[anchor_pos]].bytes;
+    let anchor_end = at + anchor.len();
+    if (at != 0 && is_word(folded(data[at - 1])))
+        || anchor_end > data.len()
+        || (anchor_end < data.len() && is_word(folded(data[anchor_end])))
+        || !same_token(&data[at..anchor_end], anchor)
+    {
+        return false;
+    }
+    let mut cursor = at;
+    for q in (0..anchor_pos).rev() {
+        while cursor > 0 && !is_word(folded(data[cursor - 1])) {
+            cursor -= 1;
+        }
+        let end = cursor;
+        while cursor > 0 && is_word(folded(data[cursor - 1])) {
+            cursor -= 1;
+        }
+        if cursor == end || !same_token(&data[cursor..end], &terms[ids[q]].bytes) {
+            return false;
         }
     }
-    usize::MAX
+    cursor = anchor_end;
+    for &id in &ids[anchor_pos + 1..] {
+        while cursor < data.len() && !is_word(folded(data[cursor])) {
+            cursor += 1;
+        }
+        let start = cursor;
+        while cursor < data.len() && is_word(folded(data[cursor])) {
+            cursor += 1;
+        }
+        if cursor == start || !same_token(&data[start..cursor], &terms[id].bytes) {
+            return false;
+        }
+    }
+    true
 }
-fn output_set(s: Set, n: usize, out: &mut Vec<u8>) {
+#[cfg(target_feature = "avx2")]
+fn anchor_mask32(bytes: &[u8], first: u8) -> u32 {
+    use std::arch::x86_64::*;
+    // SAFETY: caller supplies 32 readable bytes and the build enables AVX2.
+    unsafe {
+        let v = _mm256_loadu_si256(bytes.as_ptr().cast());
+        let compared = if first.is_ascii_alphabetic() {
+            // ASCII letters are folded with OR 0x20; digits use exact comparison below.
+            _mm256_or_si256(v, _mm256_set1_epi8(0x20))
+        } else {
+            v
+        };
+        _mm256_movemask_epi8(_mm256_cmpeq_epi8(compared, _mm256_set1_epi8(first as i8))) as u32
+    }
+}
+fn phrase_in_doc(data: &[u8], ids: &[usize], anchor: usize, terms: &[Term]) -> bool {
+    let first = folded(terms[anchor].bytes[0]);
+    let mut anchor_positions = [0usize; 8];
+    let mut count = 0;
+    for (i, &id) in ids.iter().enumerate() {
+        if id == anchor {
+            anchor_positions[count] = i;
+            count += 1;
+        }
+    }
+    let mut base = 0;
+    while base < data.len() {
+        #[cfg(target_feature = "avx2")]
+        if base + 32 <= data.len() {
+            let mut candidates = anchor_mask32(&data[base..base + 32], first);
+            while candidates != 0 {
+                let at = base + candidates.trailing_zeros() as usize;
+                for &anchor_pos in &anchor_positions[..count] {
+                    if phrase_matches_at(data, at, anchor_pos, ids, terms) {
+                        return true;
+                    }
+                }
+                candidates &= candidates - 1;
+            }
+            base += 32;
+            continue;
+        }
+        if folded(data[base]) == first {
+            for &anchor_pos in &anchor_positions[..count] {
+                if phrase_matches_at(data, base, anchor_pos, ids, terms) {
+                    return true;
+                }
+            }
+        }
+        base += 1;
+    }
+    false
+}
+fn output_set(s: Set<'_>, n: usize, out: &mut Vec<u8>) {
     let (count, sum, first) = match s {
         Set::List(v) => {
             (v.len(), v.iter().map(|&x| x as u64).sum::<u64>(), v.iter().take(10).copied().collect::<Vec<_>>())
@@ -345,9 +583,8 @@ fn document_id(line: &[u8]) -> (usize, usize) {
     }
     (id, tab)
 }
-fn count_chunk(docs: &[u8], start: usize, end: usize, terms: &[Term], table: &[u32]) -> (Vec<u32>, usize) {
-    let mut counts = vec![0u32; terms.len()];
-    let mut last = vec![u32::MAX; terms.len()];
+fn count_chunk(docs: &[u8], start: usize, end: usize, terms: &[Term], table: &ScanTable) -> (Vec<u32>, usize) {
+    let mut state = vec![(u32::MAX, 0u32); terms.len()];
     let (mut pos, mut rows) = (start, 0usize);
     while pos < end {
         let mut line_end = pos;
@@ -355,30 +592,20 @@ fn count_chunk(docs: &[u8], start: usize, end: usize, terms: &[Term], table: &[u
             line_end += 1;
         }
         let line = &docs[pos..line_end];
-        let (id, tab) = document_id(line);
+        let (id, _) = document_id(line);
         let id = id as u32;
-        let mut p = tab + 1;
-        while p < line.len() {
-            while p < line.len() && !is_word(folded(line[p])) {
-                p += 1;
-            }
-            let s = p;
-            while p < line.len() && is_word(folded(line[p])) {
-                p += 1;
-            }
-            if p > s {
-                if let Some(t) = lookup(terms, table, &line[s..p]) {
-                    if last[t] != id {
-                        last[t] = id;
-                        counts[t] += 1;
-                    }
+        scan_document_tokens(line, |token| {
+            if let Some(t) = lookup(terms, table, token) {
+                if state[t].0 != id {
+                    state[t].0 = id;
+                    state[t].1 += 1;
                 }
             }
-        }
+        });
         rows += 1;
         pos = line_end + 1;
     }
-    (counts, rows)
+    (state.into_iter().map(|x| x.1).collect(), rows)
 }
 fn fill_chunk(
     docs: &[u8],
@@ -386,15 +613,26 @@ fn fill_chunk(
     end: usize,
     chunk: usize,
     terms: &[Term],
-    table: &[u32],
+    table: &ScanTable,
     counts: &[Vec<u32>],
     offsets: &[usize],
     bitmaps: &[AtomicU64],
     post_ptrs: &[usize],
     text_ptr: usize,
 ) {
-    let mut cursor = vec![0usize; terms.len()];
-    let mut last = vec![u32::MAX; terms.len()];
+    let mut state = vec![(u32::MAX, 0usize); terms.len()];
+    let term_count = terms.len();
+    let mut write_ptr = Vec::with_capacity(term_count);
+    let mut kind = Vec::with_capacity(term_count);
+    for (t, term) in terms.iter().enumerate() {
+        if term.bitmap {
+            write_ptr.push(0usize);
+            kind.push(u32::try_from(term.offset).expect("bitmap offset fits u32"));
+        } else {
+            write_ptr.push(post_ptrs[t] + offsets[chunk * term_count + t] * std::mem::size_of::<u32>());
+            kind.push(u32::MAX);
+        }
+    }
     let mut pos = start;
     while pos < end {
         let mut line_end = pos;
@@ -408,41 +646,31 @@ fn fill_chunk(
         unsafe {
             (text_ptr as *mut u32).add(id as usize).write((pos + tab + 1) as u32);
         }
-        let mut p = tab + 1;
-        while p < line.len() {
-            while p < line.len() && !is_word(folded(line[p])) {
-                p += 1;
-            }
-            let s = p;
-            while p < line.len() && is_word(folded(line[p])) {
-                p += 1;
-            }
-            if p > s {
-                if let Some(t) = lookup(terms, table, &line[s..p]) {
-                    if last[t] != id {
-                        last[t] = id;
-                        if terms[t].bitmap {
-                            let term = &terms[t];
-                            bitmaps[term.offset + id as usize / 64].fetch_or(1u64 << (id % 64), Ordering::Relaxed);
-                        } else {
-                            let slot = offsets[chunk * terms.len() + t] + cursor[t];
-                            // SAFETY: pass-A counts define non-overlapping per-chunk slices; each distinct term/document pair writes one slot.
-                            unsafe {
-                                (post_ptrs[t] as *mut u32).add(slot).write(id);
-                            }
-                            cursor[t] += 1;
+        scan_document_tokens(line, |token| {
+            if let Some(t) = lookup(terms, table, token) {
+                if state[t].0 != id {
+                    state[t].0 = id;
+                    if kind[t] != u32::MAX {
+                        bitmaps[kind[t] as usize + id as usize / 64].fetch_or(1u64 << (id % 64), Ordering::Relaxed);
+                    } else {
+                        let slot = state[t].1;
+                        // SAFETY: pass-A counts define non-overlapping per-chunk slices; each distinct term/document pair writes one slot.
+                        unsafe {
+                            (write_ptr[t] as *mut u32).add(slot).write(id);
                         }
+                        state[t].1 += 1;
                     }
                 }
             }
-        }
+        });
         pos = line_end + 1;
     }
-    debug_assert!(counts[chunk].iter().enumerate().all(|(t, &n)| terms[t].bitmap || cursor[t] == n as usize));
+    debug_assert!(counts[chunk].iter().enumerate().all(|(t, &n)| terms[t].bitmap || state[t].1 == n as usize));
 }
 fn eval_query(
     q: &Query,
     terms: &[Term],
+    _table: &ScanTable,
     posts: &[Vec<u32>],
     bits: &[u64],
     docs: &[u8],
@@ -477,32 +705,8 @@ fn eval_query(
                     continue;
                 }
                 let start = text_starts[d as usize] as usize;
-                let end = if (d as usize) + 1 < n { text_starts[d as usize + 1] as usize - 1 } else { docs.len() - 1 };
-                let mut p = start;
-                let mut window = [usize::MAX; 8];
-                let mut token_count = 0usize;
-                let mut matched = false;
-                while p < end {
-                    while p < end && !is_word(folded(docs[p])) {
-                        p += 1;
-                    }
-                    let s = p;
-                    while p < end && is_word(folded(docs[p])) {
-                        p += 1;
-                    }
-                    if p > s {
-                        window[token_count % 8] = phrase_token_id(ids, terms, &docs[s..p]);
-                        token_count += 1;
-                        if token_count >= ids.len() && window[(token_count - 1) % 8] == *ids.last().unwrap() {
-                            let first = token_count - ids.len();
-                            if (0..ids.len()).all(|j| window[(first + j) % 8] == ids[j]) {
-                                matched = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if matched {
+                let end = docs[start..].iter().position(|&b| b == b'\n').map_or(docs.len(), |offset| start + offset);
+                if phrase_in_doc(&docs[start..end], ids, anchor, terms) {
                     found.push(d);
                 }
             }
@@ -524,18 +728,7 @@ fn main() -> io::Result<()> {
     let (mut terms, queries) = parse_queries(&qdata);
     let (_file, ptr, len) = map_file(Path::new(&format!("{root}/docs.txt")))?;
     let docs = unsafe { std::slice::from_raw_parts(ptr, len) }; // SAFETY: read-only slice covers the live mmap and never outlives the mapping.
-    let mut slots = 1usize;
-    while slots < terms.len() * 2 {
-        slots *= 2;
-    }
-    let mut table = vec![0u32; slots];
-    for (i, t) in terms.iter().enumerate() {
-        let mut p = t.hash as usize & (slots - 1);
-        while table[p] != 0 {
-            p = (p + 1) & (slots - 1);
-        }
-        table[p] = (i + 1) as u32;
-    }
+    let table = ScanTable::new(&terms);
     let scan_workers = std::thread::available_parallelism().map_or(1, usize::from).min(12);
     let mut boundaries = vec![0usize];
     for i in 1..scan_workers {
@@ -619,34 +812,49 @@ fn main() -> io::Result<()> {
             handle.join().expect("postings worker panicked");
         }
     });
-    let bits: Vec<u64> = bitmaps.iter().map(|x| x.load(Ordering::Relaxed)).collect();
+    // SAFETY: AtomicU64 and u64 have identical layout, and every writer has joined; no atomic access remains.
+    let bits: &[u64] = unsafe { std::slice::from_raw_parts(bitmaps.as_ptr().cast::<u64>(), bitmaps.len()) };
     let workers = std::thread::available_parallelism().map_or(1, usize::from).min(12).min(queries.len().max(1));
-    let block = queries.len().div_ceil(workers);
+    const QUERY_BLOCK: usize = 64;
+    let next_query = AtomicUsize::new(0);
+    let query_len = queries.len();
+    let queries_ref = &queries;
     let mut out = Vec::with_capacity(queries.len() * 24);
-    std::thread::scope(|scope| {
+    let completed: Vec<(usize, Vec<u8>)> = std::thread::scope(|scope| {
         let mut handles = Vec::new();
-        for chunk in queries.chunks(block) {
+        for _ in 0..workers {
             let terms_ref = &terms;
+            let table_ref = &table;
             let posts_ref = &posts;
             let bits_ref = &bits;
             let starts_ref = &text_starts;
+            let next_ref = &next_query;
             handles.push(scope.spawn(move || {
-                let mut part = Vec::new();
-                for q in chunk {
-                    part.extend_from_slice(&eval_query(q, terms_ref, posts_ref, bits_ref, docs, starts_ref, n));
+                let mut blocks = Vec::new();
+                loop {
+                    let start = next_ref.fetch_add(QUERY_BLOCK, Ordering::Relaxed);
+                    if start >= query_len {
+                        break;
+                    }
+                    let mut part = Vec::new();
+                    for q in &queries_ref[start..(start + QUERY_BLOCK).min(query_len)] {
+                        part.extend_from_slice(&eval_query(
+                            q, terms_ref, table_ref, posts_ref, bits_ref, docs, starts_ref, n,
+                        ));
+                    }
+                    blocks.push((start / QUERY_BLOCK, part));
                 }
-                part
+                blocks
             }));
         }
-        for h in handles {
-            let part = h.join().expect("query worker panicked");
-            out.extend(part);
-        }
+        handles.into_iter().flat_map(|h| h.join().expect("query worker panicked")).collect()
     });
+    let mut completed = completed;
+    completed.sort_unstable_by_key(|x| x.0);
+    for (_, part) in completed {
+        out.extend(part);
+    }
     std::fs::create_dir_all(output_dir)?;
     std::fs::write(Path::new(output_dir).join("results.txt"), &out)?;
-    let mut stdout = io::BufWriter::new(io::stdout().lock());
-    stdout.write_all(&out)?;
-    stdout.flush()?;
     Ok(())
 }

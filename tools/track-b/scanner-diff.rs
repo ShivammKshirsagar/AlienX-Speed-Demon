@@ -3,12 +3,22 @@ mod solution;
 
 use std::fs;
 
+fn scalar_tokens<F: FnMut(&[u8])>(data: &[u8], mut visit: F) {
+    let mut p = 0;
+    while p < data.len() {
+        while p < data.len() && !data[p].is_ascii_alphanumeric() { p += 1; }
+        let start = p;
+        while p < data.len() && data[p].is_ascii_alphanumeric() { p += 1; }
+        if p > start { visit(&data[start..p]); }
+    }
+}
+
 fn ids_for_line(line: &[u8], terms: &[solution::Term], table: &solution::ScanTable, scalar: bool) -> Vec<usize> {
     let body = line.iter().position(|&b| b == b'\t').map_or(&[][..], |p| &line[p + 1..]);
     let mut ids = Vec::new();
     let mut push = |token: &[u8]| ids.push(solution::lookup(terms, table, token).unwrap_or(usize::MAX));
     if scalar {
-        solution::scan_tokens_scalar(body, &mut push);
+        scalar_tokens(body, &mut push);
     } else {
         solution::scan_tokens(body, &mut push);
     }
@@ -17,7 +27,7 @@ fn ids_for_line(line: &[u8], terms: &[solution::Term], table: &solution::ScanTab
 
 fn check_equal(bytes: &[u8], chunk_bytes: usize) {
     let mut scalar = Vec::new();
-    solution::scan_tokens_scalar(bytes, |t| scalar.push(t.to_vec()));
+    scalar_tokens(bytes, |t| scalar.push(t.to_vec()));
     #[cfg(target_feature = "avx2")]
     {
         let mut fast = Vec::new();

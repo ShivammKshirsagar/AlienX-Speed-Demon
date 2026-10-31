@@ -168,3 +168,9 @@ AVX2 token masks and an inline 128-bit term key now serve both corpus passes and
 
 ## Phrase boundary and query-path update (local WSL measurement, no board run)
 Fixed PHRASE document bounds; borrowed bitmap rows, dynamic 64-query blocks, per-worker scan state, and AVX2 anchor verification reduced the single instrumented wall run 1.86 to 1.38 s (query 476 to 200 ms); final three-run median 2.195 s, 378,816 KB RSS, expected seed-1 hash passed. Rust + Dockerfile: 869 lines.
+
+## One-pass hot/cold attempt (local WSL measurement, no board run)
+Sampled hot bitmaps and one-pass cold-pair scatter passed the required sample/tiny checks and all three seed-1 hashes, but median stayed 2.195 s (baseline 2.195 s); reverted to `tools/track-b/baseline-src` at the 25% stop gate.
+
+## Hot/cold one-pass B (local WSL measurement, no board run)
+Reinstated sampled 1,024-term hot bitmaps and one-pass cold pairs, sorted before flat scatter; pass-B ablations (probe only / bitmap / postings) were 409.759 / 486.972 / 622.342 ms, so postings dominated. Min-of-5 phase times, ms (parse/table/scan A/setup/scan B/query/output): baseline 58.1/5.5/308.4/45.0/702.0/183.3/4.2, 1,306.727 total, 126,132 KB RssAnon; final B 78.8/15.4/0/19.6/656.7/220.2/4.6, 995.466 total, 96,648 KB. A was 1,319.802 ms; B sorted-pair trial was 765.971 ms. External-minus-internal gap: 77.860 ms. Seed-1 hash passed five times; Rust + Dockerfile: 796 lines.
