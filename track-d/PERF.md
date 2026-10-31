@@ -5,9 +5,49 @@ Every step from the reference to your final version, each with the live-board ru
 | Step | Change | Run ID | T (s) | M (MB) | Points |
 |---|---|---|---|---|---|
 | 0 | The reference, unchanged | | 72.69 | 893 | 0 |
-| 1 | Rust baseline: Unix mmap, parallel chunked parsing, forward CSR, reusable distance state + touched-node list, atomic query distribution, pre-sized output | TBD | 5.05 (local proxy) | 215 (local proxy) | TBD |
+| 1 | Rust baseline: Unix mmap, parallel chunked parsing, forward CSR, reusable distance state + touched-node list, atomic query distribution, pre-sized output | run-c21758fd2f7f | 1.701 (board) / 5.05 (local) | 238 (board) / 215 (local) | 40.24 (board) |
+| 2 | Cheap reachability shortcuts ($s == t$, $\text{out\_deg}(s) == 0$, $\text{in\_deg}(t) == 0$) [duplicate cache ablated] | TBD | 4.45 (local proxy) | 246 (local proxy) | TBD |
 
-*Note: Step 0 numbers (72.69 s, 893 MB) are the organisers' official scoring-box baseline. Step 1 figures (5.05 s, 215 MB) are local measurements under Docker Desktop (WSL2 cgroup v2, 4 worker threads active locally) and serve as a local proxy; board run ID is marked TBD and will be updated from live board runs.*
+*Note: Step 0 numbers (72.69 s, 893 MB) are the organisers' official scoring-box baseline. Step 1 includes official live board measurements (run-c21758fd2f7f: 1.701 s, 238 MB, S=295, K=6.377) alongside earlier 4-worker local measurements (5.05 s, 215 MB). Step 2 figures (4.45 s container time / 3.42 s internal solution time, 246 MB) are local measurements on an AMD Ryzen 5 4600H under Docker Desktop (WSL2 cgroup v2, 12 workers) and serve as a local proxy; board run ID is marked TBD.*
+
+---
+
+## Step 2: Query Reachability Shortcuts & Ablations
+
+### 1. Approach & Changes
+- **Shortcuts**:
+  - $s == t \implies 0$ answered in $O(1)$.
+  - $s \neq t$ and $\text{out\_deg}(s) == 0$ (`offsets[s + 1] == offsets[s]`) $\implies -1$.
+  - $s \neq t$ and $\text{in\_deg}(t) == 0$ (`!has_in[t]`) $\implies -1$. A 1.74 MB boolean array `has_in` tracks nodes with at least one incoming edge, populated in $\approx 1.5\text{ ms}$ after CSR construction.
+  - Bounds checks `s >= n` and `t >= n` dropped as the spec guarantees $0 \le s, t < n$.
+  - In full dataset seed 1, this eliminates the two large unreachable queries (query 781 and query 1914) that otherwise traverse the entire 1.74M node component, saving **3,480,742 settled node relaxations** and $\approx 1.27\text{ s}$ of local query time.
+- **Ablation: Duplicate Query Cache (REJECTED / ABLATED)**:
+  - Deduplicating queries via standard library `HashMap` saved only 153,017 settled nodes (0.66%) across 20 duplicate queries.
+  - Measured local query time: $2,163\text{ ms}$ with cache vs $2,126\text{ ms}$ without cache ($\Delta \approx 0\text{ ms}$, within run-to-run noise).
+  - The cache required $\approx 35$ extra code lines. Because 35 lines costs $\approx 1.4\%$ of $K$ on $S^{0.15}$ for no measurable time benefit, the duplicate cache was rejected and ablated.
+- **Safety Documentation**:
+  - Added explicit `// SAFETY:` rationale comments to all `unsafe` FFI blocks (`mmap`, `munmap`, slice construction, raw pointer writes).
+
+### 2. Measured Results (Local Proxy)
+- **Local Wall Time (median of 5 runs, warm page cache, 12 workers)**:
+  - Run 1: 4.934 s, peak: 221.70 MB
+  - Run 2: 4.438 s, peak: 246.19 MB
+  - Run 3: 4.452 s, peak: 239.76 MB
+  - Run 4: 4.367 s, peak: 248.61 MB
+  - Run 5: 5.171 s, peak: 251.00 MB
+  - **Median time**: **4.45 s** (including container launch overhead; internal solution time **3.42 s**, down from 4.54 s on baseline with 12 workers).
+- **Local Peak Memory**: **246.19 MB** ($258,150,400$ bytes read from `/sys/fs/cgroup/memory.peak`).
+- **Uncontended 1-Worker Query Cost**: **445.1 ns / settled node** (measured via profiler with `PROFILE_WORKERS=1`).
+- **Source Size ($S$)**: **307 code lines** (298 in `src/main.rs`, 8 in `Dockerfile`, 1 in `.dockerignore`). Net change from baseline: **+12 lines**.
+- **Direct Runtime Dependencies ($D$)**: **$D = 1$** (zero external dependencies).
+- **Verification**:
+  - Worked example: exact 42 bytes, SHA-256 `2e9871bb...` (PASS).
+  - Empty queries: exact 0 bytes (PASS).
+  - Single node & $m = 0$: PASS.
+  - Multi-seed tiny & sample datasets (seeds 1, 2, 3, 7): all PASS.
+  - Full seed 1: exact 9,039 bytes, SHA-256 `a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e` (PASS).
+  - 50/50 randomized stress tests against reference: all PASS.
+  - Official gate `check.py`: PASS.
 
 ---
 
@@ -52,13 +92,3 @@ Measured post-process-exit from `/sys/fs/cgroup/memory.peak` under sandbox const
 - `track-d/.dockerignore`: 1 code line (`target/`).
 - Total source count: $S \approx 293$ code lines (or 294 including `.dockerignore`).
 - Direct dependencies: $D = 1$ (zero external crates; standard library only).
-
-### 5. Indicative $K$ Estimate
-Using the scoring formula $K = (T_\text{ref}/T)^{0.50} \times (M_\text{ref}/M)^{0.20} \times (S_\text{ref}/S)^{0.15} \times (D_\text{ref}/D)^{0.15}$:
-- Baselines: $T_\text{ref} = 72.69\text{ s}$, $M_\text{ref} = 893\text{ MB}$, $S_\text{ref} \approx 62$ (Python reference), $D_\text{ref} = 1$.
-- Local inputs: local wall proxy $T \approx 5.05\text{ s}$ (with 4 workers; estimated $\le 2.0\text{ s}$ with 12 workers on scoring box), local memory proxy $M \approx 215\text{ MB}$, $S \approx 293$, $D = 1$.
-- Conservative local proxy estimate (with $T = 5.05\text{ s}$):
-  $$K_\text{local} \approx \left(\frac{72.69}{5.05}\right)^{0.50} \times \left(\frac{893}{215}\right)^{0.20} \times \left(\frac{62}{293}\right)^{0.15} \times 1.0 \approx 3.79 \times 1.33 \times 0.79 \approx 3.98$$
-- Estimated scoring box projection (with $T \approx 2.0\text{ s}$ on 12 threads):
-  $$K_\text{proj} \approx \left(\frac{72.69}{2.00}\right)^{0.50} \times \left(\frac{893}{215}\right)^{0.20} \times \left(\frac{62}{293}\right)^{0.15} \times 1.0 \approx 6.03 \times 1.33 \times 0.79 \approx 6.34$$
-*(All $K$ figures are estimates. Official score depends on dedicated scoring box timings and board run IDs.)*

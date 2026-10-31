@@ -9,7 +9,9 @@ struct Mapping {
     len: usize,
 }
 
+// SAFETY: Mapping owns the mmap allocation and raw pointer, which can be safely sent across threads.
 unsafe impl Send for Mapping {}
+// SAFETY: Mapping provides read-only access to the mapped byte slice, safe for concurrent shared reads.
 unsafe impl Sync for Mapping {}
 
 impl Mapping {
@@ -33,6 +35,8 @@ impl Mapping {
                 offset: isize,
             ) -> *mut std::ffi::c_void;
         }
+        // SAFETY: MAP_PRIVATE (2) with PROT_READ (1). Passing null lets the kernel select the
+        // address. The file descriptor and length are valid.
         let ptr = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, file.as_raw_fd(), 0) };
         assert_ne!(ptr as isize, -1, "mmap failed");
         Self {
@@ -46,6 +50,7 @@ impl Mapping {
         if self.len == 0 {
             &[]
         } else {
+            // SAFETY: self.ptr points to self.len valid readable bytes mapped from the input file.
             unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
         }
     }
@@ -57,6 +62,7 @@ impl Drop for Mapping {
             unsafe extern "C" {
                 fn munmap(addr: *mut std::ffi::c_void, length: usize) -> i32;
             }
+            // SAFETY: self.ptr was returned by mmap and is unmapped exactly once upon drop.
             unsafe {
                 munmap(self.ptr.cast(), self.len);
             }
@@ -182,6 +188,8 @@ fn main() {
                 for (u, v, w) in edges {
                     let p = deg[u as usize];
                     deg[u as usize] += 1;
+                    // SAFETY: p is a partitioned non-overlapping index strictly less than sum,
+                    // uniquely allocated by the prefix sum over degrees.
                     unsafe {
                         *h_ptr.add(p as usize) = v;
                         *w_ptr.add(p as usize) = w;
@@ -190,6 +198,11 @@ fn main() {
             });
         }
     });
+
+    let mut has_in = vec![false; n as usize];
+    for &v in &heads {
+        has_in[v as usize] = true;
+    }
 
     let q_data = queries_map.bytes();
     let mut queries = Vec::new();
@@ -215,16 +228,28 @@ fn main() {
         .map(|_| AtomicU64::new(INF))
         .collect::<Vec<_>>();
 
-    if num_queries > 0 {
-        let query_idx = AtomicUsize::new(0);
+    let mut to_solve = Vec::new();
+    for (idx, &(s, t)) in queries.iter().enumerate() {
+        if s == t {
+            results[idx].store(0, Ordering::Relaxed);
+        } else if offsets[s as usize + 1] == offsets[s as usize] || !has_in[t as usize] {
+            // Unreachable: remains INF (-1)
+        } else {
+            to_solve.push(idx);
+        }
+    }
+
+    if !to_solve.is_empty() {
+        let work_idx = AtomicUsize::new(0);
         let q_workers = thread::available_parallelism()
             .map_or(1, usize::from)
             .min(12)
-            .min(num_queries);
+            .min(to_solve.len());
 
         thread::scope(|scope| {
             for _ in 0..q_workers {
-                let query_idx = &query_idx;
+                let work_idx = &work_idx;
+                let to_solve = &to_solve;
                 let queries = &queries;
                 let results = &results;
                 let offsets = &offsets;
@@ -237,38 +262,37 @@ fn main() {
                     let mut heap = std::collections::BinaryHeap::new();
 
                     loop {
-                        let idx = query_idx.fetch_add(1, Ordering::Relaxed);
-                        if idx >= queries.len() {
+                        let widx = work_idx.fetch_add(1, Ordering::Relaxed);
+                        if widx >= to_solve.len() {
                             break;
                         }
+                        let idx = to_solve[widx];
                         let (s, t) = queries[idx];
                         let mut ans = INF;
 
-                        if s < n {
-                            dist[s as usize] = 0;
-                            touched.push(s);
-                            heap.push(std::cmp::Reverse((0u64, s)));
+                        dist[s as usize] = 0;
+                        touched.push(s);
+                        heap.push(std::cmp::Reverse((0u64, s)));
 
-                            while let Some(std::cmp::Reverse((d, u))) = heap.pop() {
-                                if d > dist[u as usize] {
-                                    continue;
-                                }
-                                if u == t {
-                                    ans = d;
-                                    break;
-                                }
-                                let start = offsets[u as usize] as usize;
-                                let end = offsets[u as usize + 1] as usize;
-                                for i in start..end {
-                                    let v = heads[i];
-                                    let nd = d + weights[i] as u64;
-                                    if nd < dist[v as usize] {
-                                        if dist[v as usize] == INF {
-                                            touched.push(v);
-                                        }
-                                        dist[v as usize] = nd;
-                                        heap.push(std::cmp::Reverse((nd, v)));
+                        while let Some(std::cmp::Reverse((d, u))) = heap.pop() {
+                            if d > dist[u as usize] {
+                                continue;
+                            }
+                            if u == t {
+                                ans = d;
+                                break;
+                            }
+                            let start = offsets[u as usize] as usize;
+                            let end = offsets[u as usize + 1] as usize;
+                            for i in start..end {
+                                let v = heads[i];
+                                let nd = d + weights[i] as u64;
+                                if nd < dist[v as usize] {
+                                    if dist[v as usize] == INF {
+                                        touched.push(v);
                                     }
+                                    dist[v as usize] = nd;
+                                    heap.push(std::cmp::Reverse((nd, v)));
                                 }
                             }
                         }
