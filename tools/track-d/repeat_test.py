@@ -44,13 +44,13 @@ for i in range(1, 21):
     print(f"Full run {i:02d}: PASS ({h[:16]}...)")
 
 print("\n--- Testing Worker Counts (1, 4, 12 workers) on Sample ---")
-for workers, cpuset in [(1, "0"), (4, "0-3"), (12, "0-11")]:
+for workers, cpuset in [(1, "0"), (4, "0-3"), (12, None)]:
     h = run_container(SAMPLE_DIR, cpuset=cpuset)
     assert h == EXPECTED_SAMPLE, f"Sample {workers} workers mismatch: {h}"
     print(f"Sample @ {workers:2d} workers: PASS ({h})")
 
 print("\n--- Testing Worker Counts (1, 4, 12 workers) on Full ---")
-for workers, cpuset in [(1, "0"), (4, "0-3"), (12, "0-11")]:
+for workers, cpuset in [(1, "0"), (4, "0-3"), (12, None)]:
     h = run_container(FULL_DIR, cpuset=cpuset)
     assert h == EXPECTED_FULL, f"Full {workers} workers mismatch: {h}"
     print(f"Full @ {workers:2d} workers: PASS ({h})")

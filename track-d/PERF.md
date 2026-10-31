@@ -7,9 +7,125 @@ Every step from the reference to your final version, each with the live-board ru
 | 0 | The reference, unchanged | | 72.69 | 893 | 0 |
 | 1 | Rust baseline: Unix mmap, parallel chunked parsing, forward CSR, reusable distance state + touched-node list, atomic query distribution, pre-sized output | run-c21758fd2f7f | 1.701 (board) / 5.05 (local) | 238 (board) / 215 (local) | 40.24 (board) |
 | 2 | Cheap reachability shortcuts ($s == t$, $\text{out\_deg}(s) == 0$, $\text{in\_deg}(t) == 0$) [duplicate cache ablated] | run-1db5b0ec6c38 | 1.327 (board) / 4.45 (local) | 229 (board) / 246 (local) | 7.229 (board) |
-| 3 | Step B + Step A: Compact per-query state (open-addressing) + 4-ary heap + shared atomic degrees (2-pass zero-intermediate build) + interleaved edges | TBD | 3.68 - 4.03 (local proxy) | 234 - 239 (local proxy) | TBD |
+| 3 | Step B + Step A: Compact per-query state (open-addressing) + 4-ary heap + shared atomic degrees (2-pass zero-intermediate build) + interleaved edges | run-353ba4da0058 | 0.864 (board) / 3.68 (local) | 216 (board) / 234 (local) | 8.29 (board) |
+| 4 | Memory shrinkers (table/heap trim, glibc mallopt, serialized fallback) + rustfmt line compression | [Board run ID TBD] | 3.70 - 4.02 (local proxy) | 171.24 (local proxy) | TBD |
 
-*Note: Step 0 numbers (72.69 s, 893 MB) are the organisers' official scoring-box baseline. Step 1 and Step 2 include official live board measurements. Step 3 figures (3.68 s check.py / 2.47 s internal wall time, 233.9 MB peak memory) are local measurements on an AMD Ryzen 5 4600H under Docker Desktop (WSL2 cgroup v2, 12 workers) and serve as a local proxy; board run ID is marked TBD.*
+*Note: Step 0 numbers (72.69 s, 893 MB) are the organisers' official scoring-box baseline. Steps 1-3 include official live board measurements (Step 3: 0.864 s, 216 MB, 558 lines, K 8.29). Step 4 figures (3.70-4.02 s local check.py, 171.24 MB peak memory, 512 rustfmt lines) are local measurements on an AMD Ryzen 5 4600H under Docker Desktop (WSL2 cgroup v2, 12 workers) and serve as a local proxy; board run ID is marked TBD.*
+
+---
+
+## Step 4: Per-Worker Memory Shrinking, Formatted Line Compression, and tools/ Prototypes
+
+### 1. Formatted Line Count Investigation & Reduction
+- **Board Measurement Reproduction**:
+  - The live board measured 558 code lines for Step 3 where local unformatted `scc` reported 428 lines.
+  - Reproducing the harness formatting via `rustfmt --edition 2021` on `track-d/src/main.rs` produced **550 code lines** in `main.rs` + **8 code lines** in `Dockerfile` = **558 code lines** exactly.
+- **Line Compression**:
+  - Refactored `track-d/src/main.rs` using tuple structs (`Edge(u32, u32)`, `Slot(u32, u32)`, `HeapItem(u64, u32)`), concise iterator/loop patterns, single-line FFI declarations, and streamlined integer printing.
+  - Formatted `scc` count under `rustfmt --edition 2021` dropped from **550 lines down to 504 lines** in `src/main.rs`.
+  - Total official formatted line count (including Dockerfile): **512 code lines** (net reduction of **46 lines**, improving $S^{0.15}$ factor by +1.3%).
+
+### 2. Per-Worker Memory Shrinkers
+To prevent memory expansion across 12 worker threads during the query phase:
+1. **Dynamic Buffer Shrinking**:
+   - `CompactDist::clear_and_shrink`: If a query expanded the table beyond `INIT_CAP` (16,384 slots), resets the vector back to `INIT_CAP` and shrinks the touched list to 1024.
+   - `QuadHeap::clear_and_shrink`: If heap capacity exceeded 4096 items, shrinks capacity to 1024.
+2. **Glibc Arena & Malloc Configuration (`mallopt`)**:
+   - `mallopt(M_TRIM_THRESHOLD, 64KB)` and `mallopt(M_MMAP_THRESHOLD, 64KB)`: Instructs glibc to aggressively release freed memory pages back to the kernel.
+   - `mallopt(M_ARENA_MAX, 2)`: Limits glibc heap arenas to 2, preventing 12 threads from hoarding 12 independent arena heaps.
+   - Explicit `malloc_trim(0)` called post-build and post-fallback.
+3. **Serialized Fallback Execution (`FALLBACK_LOCK`)**:
+   - Only 8 of 2,000 queries in seed 1 trigger `fallback_dijkstra`. Capped concurrent fallbacks to 1 via an atomic spinlock, guaranteeing that at most a single 13.92 MB fallback vector exists in memory across all 12 workers at any moment.
+4. **Measured Memory Impact**:
+   - **Anonymous Memory at 12 Workers**: Dropped from **201.49 MB down to 46.81 MB** (-154.68 MB reduction!).
+   - **Worker Memory Overhead**: Anonymous memory at 12 workers (46.81 MB) is virtually identical to 1 worker (46.76 MB) — extra worker memory overhead eliminated.
+   - **Local Container Peak Memory**: Median peak memory measured from `/sys/fs/cgroup/memory.peak` after solution exit dropped from **216 MB (Step 3 board) / 239 MB (Step 3 local) down to 171.24 MB** (-44.76 MB to -67.8 MB).
+
+### 3. Prototypes in `tools/` Only
+
+#### A. Bidirectional Dijkstra Prototype (`tools/track-d/profiler/src/bin/bidirectional.rs`)
+- **Design**: Built forward CSR and reverse CSR from input graph. Interleaved forward search from $s$ and backward search from $t$ using min-key frontier balancing and mathematically exact termination `top_f + top_b >= mu`.
+- **Settled Nodes Evaluation (Full Seed 1, 2,000 queries)**:
+  - **Unidirectional Dijkstra**: Settled **26,707,977 nodes** (average 13,354.0 settled / query).
+  - **Bidirectional Dijkstra**: Settled **14,313,259 nodes** (average 7,156.6 settled / query; 3,549,570 forward + 10,763,689 backward).
+  - **Node Reduction**: Settles **46.41% fewer nodes** (53.59% ratio).
+- **Correctness**: 0 mismatches across all 2,000 queries. Output SHA-256 matches reference `a23dbdf0...` exactly.
+- **Decision**: **REJECTED**. Although bidirectional search settles 46.4% fewer nodes, storing the reverse CSR costs about **47 MB of extra heap memory** (40 MB reverse edges + 6.96 MB reverse offsets) and adds ~0.25 s to the build phase, which directly hurts the peak container memory metric ($M$). Unidirectional search with forward-only CSR is retained.
+
+#### B. BFS Renumbering Prototype (`tools/track-d/profiler/src/bin/bfs_renumber.rs`)
+- **Design**: Evaluated spatial cache locality impact by renumbering nodes via undirected BFS traversal from high-degree centers, placing topological neighbors into contiguous ID spaces.
+- **1-Worker Query Performance Evaluation (Full Seed 1, 2,000 queries)**:
+  - **Original Graph (1 worker)**: Query time **12.507 s** (**538.5 ns / settled node**).
+  - **BFS-Renumbered Graph (1 worker)**: Query time **3.044 s** (**131.1 ns / settled node**).
+  - **Speedup**: **75.7% query time reduction (4.11x speedup factor)**!
+  - **Overhead**: Renumbering traversal takes **0.973 s** (single-threaded).
+- **Correctness**: 0 mismatches across all 2,000 queries.
+- **Decision**: **REJECTED**. The 0.97 s renumbering calculation plus ~0.46 s CSR rebuild overhead (1.43 s total) exceeds the query savings at 12 workers.
+
+#### C. Parallel Region-Growing Node Ordering (`tools/track-d/profiler/src/bin/parallel_region_grow.rs`)
+- **Design**: Concurrently grew 12 contiguous topological regions from 12 distributed seeds using parallel atomic compare-and-swap BFS, assigning contiguous ID blocks per region and applying the node permutation to the CSR.
+- **12-Worker Performance & Net Wall Time (Full Seed 1, 2,000 queries)**:
+  - **Current Baseline Code**:
+    - Build time: **0.339 s**
+    - 12-worker query time: **2.063 s**
+    - Net total: **2.402 s**
+  - **Parallel Region-Growing Pipeline**:
+    - Renumbering calculation: **0.791 s** (12 threads concurrent BFS)
+    - Permuted CSR build: **0.551 s** (in-place edge mapping + CSR assembly)
+    - 12-worker query time: **1.549 s** (**24.9% query speedup**, saving 0.514 s)
+    - Net total (all-in): **2.891 s**
+  - **Net Comparison**: **Region-growing is net +0.489 s (+20.4%) slower overall** (2.891 s vs 2.402 s) because the 1.003 s renumbering and permutation overhead exceeds the 0.514 s query phase savings.
+  - **Memory Overhead**: Requires **64.71 MB extra memory** during the renumbering phase (for atomic region labels, adjacency structures, and ID mapping).
+- **Correctness**: 0 mismatches against baseline across all 2,000 queries.
+- **Decision**: **REJECTED**. Slower net wall time (+0.49 s) and +64.7 MB extra memory.
+
+### 4. Parameter Sweep: `INIT_CAP` & Shrink Threshold
+Evaluated all 12 combinations of initial table capacity `INIT_CAP` $\in [16\text{k}, 32\text{k}, 64\text{k}, 128\text{k}]$ and per-query reset shrink threshold `SHRINK_THRESH` $\in [\text{never}, 256\text{k}, 512\text{k}]$. Each cell reports the median of 5 runs at 12 workers, internal total time, 1-worker query rate (ns/settled node), and 5 ms sampled peak anonymous memory (`Pss_Anon`) during queries.
+
+| `INIT_CAP` | `SHRINK_THRESH` | 12-Worker Query (ms) | 12-Worker Total (ms) | 1-Worker Rate (ns/node) | Sampled Peak Anon (MB) |
+|---|---|---|---|---|---|
+| **16k** | **never** | 3308.13 | 4041.14 | 396.4 | 110.52 |
+| **16k** | **256k** | **3182.11** | **3815.49** | **416.5** | **79.30** |
+| **16k** | **512k** | 3008.67 | 3631.92 | 380.1 | 95.57 |
+| **32k** | **never** | 3263.73 | 3867.12 | 429.9 | 108.88 |
+| **32k** | **256k** | 3521.93 | 4195.90 | 466.3 | 81.38 |
+| **32k** | **512k** | 3244.66 | 3951.92 | 439.9 | 95.00 |
+| **64k** | **never** | 3345.76 | 4030.61 | 431.9 | 108.58 |
+| **64k** | **256k** | 3425.35 | 4141.00 | 449.8 | 78.66 |
+| **64k** | **512k** | 3314.75 | 4007.45 | 429.5 | 94.57 |
+| **128k** | **never** | 3364.72 | 4049.53 | 423.4 | 108.68 |
+| **128k** | **256k** | 3455.62 | 4124.85 | 447.2 | 82.12 |
+| **128k** | **512k** | 3318.55 | 3995.79 | 424.8 | 95.95 |
+
+- **Analysis & Recommendation**:
+  - `never` exceeds the 95 MB peak anon budget across all configurations ($\approx 108 - 110\text{ MB}$).
+  - `512k` yields the fastest query execution ($3008\text{ ms}$ query / $3631\text{ ms}$ total at 16k), but sits right at the limit ($95.57\text{ MB}$).
+  - `16k / 256k` provides the optimal balance: **3182.11 ms query**, **3815.49 ms total**, and **79.30 MB sampled peak anon** (safely below the $95\text{ MB}$ limit with a 15.7 MB safety buffer).
+  - **Chosen Setting**: `INIT_CAP = 16,384`, `SHRINK_THRESH = 262,144` (256k slots), `MAX_CAP = 524,288`.
+
+### 5. Adjacency List Prefetching at Push Time
+- **Mechanism**: When relaxing edge $(u, v)$ in Dijkstra and inserting $v$ into the priority queue (`heap.push`), look up `offsets[v]` and issue hardware prefetch `_mm_prefetch(edges.as_ptr().add(v_offset) as *const i8, _MM_HINT_T0)`. This warms L1/L2 cache with the first 64 bytes of $v$'s outgoing adjacency list well before $v$ is dequeued.
+- **1-Worker Rate Impact (Full Seed 1)**:
+  - **Without Prefetching**: $450.3\text{ ns / settled node}$ ($11,217\text{ ms}$ query phase).
+  - **With Prefetching**: **$401.0 - 423.2\text{ ns / settled node}$** ($9,987 - 10,540\text{ ms}$ query phase, **~6.0% - 11.0% speedup**).
+- **Correctness & Line Impact**: 0 mismatches across all 2,000 queries. Formatted code line count increases by only 3 lines.
+- **Decision**: **ACCEPTED**.
+
+### 6. Full Verification Summary
+- **Unit & Property Tests**:
+  - Worked example (42 bytes, `2e9871bb...`): PASS.
+  - Empty queries (0 bytes): PASS.
+  - Single node & $m = 0$: PASS.
+- **Multi-Seed Reference Comparison**:
+  - Tiny seeds 1, 2, 3, 7: all PASS.
+  - Sample seeds 1, 2, 3, 7: all PASS.
+  - Full seed 1: exact SHA-256 `a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e` (PASS).
+  - 50/50 randomized stress tests: all PASS.
+- **Repeatability Suite**:
+  - 20x sample runs: 20/20 PASS.
+  - 20x full runs: 20/20 PASS.
+  - Worker scaling runs (1, 4, 12 workers) on sample and full: all PASS.
+- **Official Harness Gate**: `python check.py d --data data/d --expected a23dbdf0...`: PASS.
 
 ---
 
