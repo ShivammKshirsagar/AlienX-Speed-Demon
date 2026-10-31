@@ -163,3 +163,5 @@ The final worked example matched stdout and `results.txt` (SHA-256 `9c296c063de9
 - Seed 4: `0bf35d72fb61f4f510512e16f3f19ed7df7615ccd0331488f3dd737563301fcb`
 - Seed 5: `09abaaf35a7e6f3fd621d16d595c1fcb7a1db1656d32854de77c5ae40b0f0b56`
 The single Docker validation for this round passed on the restored source: base images were allowlisted, the image was 30 MB, the container output hash matched, and runtime including startup was 6.38 s.
+## AVX2 scan/probe rewrite (local WSL measurement, no board run)
+AVX2 token masks and an inline 128-bit term key now serve both corpus passes and phrase verification; scalar fallback remains. Tokenize+probe: 147.32 to 62.21 ns/token; full seed-1 wall: 2.33 to 2.22 s; Rust + Dockerfile: 768 lines. Kept; required hashes passed.
