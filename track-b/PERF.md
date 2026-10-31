@@ -4,6 +4,16 @@
 
 Board IDs are filled in by the author after each push; TBD means not yet pushed.
 
+The author supplied these five run IDs in commit order. The existing PERF record ties the second run to a board result; the other commit summaries and board metrics are not recorded here.
+
+| Step | Change | Board run ID | Commit | Board T / M / S / K | Local in-process ms | Result |
+|---|---|---|---|---|---:|---|
+| Board commit 1 | First pushed Track B commit; change summary not recorded | run-eef9f5261e85 | COMMIT-TBD | TBD / TBD / TBD / TBD | TBD | Run ID supplied; change summary and metrics remain TBD |
+| Board commit 2 | Existing recorded Track B board result | run-c29a5e5f8214 | COMMIT-TBD | 0.550 s / 202 MB / 941 / 11.49 | TBD | Existing board result |
+| Board commit 3 | Third pushed Track B commit; change summary not recorded | run-40d91ecb01ed | COMMIT-TBD | TBD / TBD / TBD / TBD | TBD | Run ID supplied; change summary and metrics remain TBD |
+| Board commit 4 | Fourth pushed Track B commit; change summary not recorded | run-f72803a9af8d | COMMIT-TBD | TBD / TBD / TBD / TBD | TBD | Run ID supplied; change summary and metrics remain TBD |
+| Board commit 5 | Fifth pushed Track B commit; change summary not recorded | run-736196dfb2c8 | COMMIT-TBD | TBD / TBD / TBD / TBD | TBD | Run ID supplied; change summary and metrics remain TBD |
+
 ## Optimization ledger
 
 | Step | Change | Board run ID | Commit | Board T / M / S / K | Local in-process ms | Result |
@@ -36,6 +46,45 @@ Board IDs are filled in by the author after each push; TBD means not yet pushed.
 | Phrase token equality | Use slice `eq_ignore_ascii_case` for exact ASCII-folded token comparison | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 971.063 | Reverted; estimated K 13.41 → 12.96; correctness passed |
 | Current packed-pair source scoreboard | 12-worker packed-pair source, three-run minimum | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 906.566 | Local estimate: T_board 0.4986 s, peak RssAnon 139,104 KB, S=1,011, K=13.407, 56.37 points; seed-1 hash OK |
 | Existing board result | Existing recorded board run | run-c29a5e5f8214 | COMMIT-TBD | 0.550 s / 202 MB / 941 / 11.49 | TBD | Board result already recorded |
+
+## Document-sharded index attempt
+
+The retained source stayed unchanged because every sharded candidate scored below the current packed-pair baseline. These are local WSL `score.sh` min-of-three estimates; no candidate was pushed. The first candidate full hash matched, and each scored candidate matched the expected seed-1 hash. The worked example, phrase-boundary fixture, and sample seed 2 passed at each milestone.
+
+| Step | Change | Board run ID | Commit | Board T / M / S / K | Local in-process ms | Result |
+|---|---|---|---|---|---:|---|
+| Shard candidate | 12 byte-balanced document shards; exact count/fill; local u16 lists or bitmaps; blockwise per-shard query evaluation | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 1,399.363 | Reverted; K 11.541, peak RssAnon 67,644 KB, S=1,689; baseline K=14.353 |
+| Ascending shard top ten | Append local result IDs in document order and merge by shard order | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 1,312.527 | Reverted with shard design; K 11.913, peak RssAnon 67,648 KB, S=1,692 |
+| Reusable BOOL list scratch | Reuse two per-worker arrays for list-only left-to-right merges | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 1,319.011 | Reverted with shard design; K 11.856, peak RssAnon 66,124 KB, S=1,772 |
+| Reusable BOOL bitmap scratch | Evaluate all-bitmap BOOL expressions in one reusable worker buffer | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 1,331.079 | Reverted with shard design; K 11.758, peak RssAnon 66,260 KB, S=1,812 |
+
+Baseline `score.sh` min-of-three: parse/table/setup/scan/query/output/total = 39.931 / 16.669 / 3.716 / 565.948 / 141.031 / 6.751 / 790.955 ms; peak RssAnon 139,104 KB; S=1,011; estimated board T=0.4350 s, K=14.353, 57.85 points. Final shard variant: 31.065 / 3.857 / 0.010 / 759.770 / 409.105 / 2.154 / 1,331.079 ms; peak RssAnon 66,260 KB; S=1,812; estimated board T=0.7321 s, K=11.758, 53.52 points. Board estimate uses local total × 0.55 and sampled peak RssAnon.
+
+One full-run summed query-thread CPU profile before the scratch changes was BOOL list 788 ms, BOOL bitmap 331 ms, PHRASE 644 ms; after was BOOL list 342 ms, BOOL bitmap 90 ms, PHRASE 537 ms. The unchanged baseline profile recorded above is BOOL list 128 ms, BOOL bitmap 679 ms, PHRASE 1,004 ms. Timings are instrumentation runs and thread CPU sums, not wall time.
+
+Final retained-source checks: worked example, phrase-boundary fixture, sample seeds 2–5 against saved references, and full seed-1 hash all passed. Synthetic 13-document (non-divisible shard count, empty documents, phrase at a document boundary) and 3-document (N < 12) cases matched expected output for both candidate and retained binaries.
+
+## Current round: cgroup memory and query work
+
+The first Docker build/run failed writing `/out/results.txt`. A follow-up with `--user 0:0` completed and printed the cgroup data below. At scan peak, local process stats were RssAnon 139,292 KB, RssFile 249,472 KB, and VmHWM 388,764 KB. Cgroup `memory.peak` was only 3.3 MiB above scan-phase RssAnon; at exit, `memory.stat file` was 1.4 MiB. Nearly all mapped `docs.txt` pages visible in local RssFile were not charged to this container's cgroup. Native WSL's process cgroup files remain unavailable, so `score.sh` estimates container peak as sampled peak RssAnon plus 3,352 KB, calibrated from this Docker run; it prefers a numeric `SD_CGROUP memory_peak` when available. The earlier board M≈202 MB remains higher than this local Docker measurement.
+
+| Step | Change | Board run ID | Commit | Board T / M / S / K | Local ms + container peak | Result |
+|---|---|---|---|---|---|---|
+| Cgroup diagnostic | Add SD_TIMING memory.peak/current/stat output and board-flags script | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | First run reached scatter; actual peak unavailable; anon 139,232 KB / file 249,472 KB / VmHWM 388,704 KB | First run failed at `/out`; the follow-up root run captured the peak in the next row |
+| Cgroup measurement retry | Run the diagnostic container as root; preserve board flags | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 885.807 ms; peak 146,067,456 B; current 109,998,080 B; anon/file/kernel/shmem = 106,176,512 / 1,462,272 / 1,355,776 / 0 B | Measurement succeeded; local RssFile was 249,472 KB but file charge at exit was 1.4 MB |
+| mmap windowing decision | Do not madvise scanned windows away | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | Not run; no source change | Not applied: cgroup peak was only 3.3 MiB above scan RssAnon and file charge was small; windows risk refaults during phrase checks without reducing the measured peak |
+| In-place sort | Replace per-worker radix scratch with in-place tuple sort | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 992.670 ms / 200,500 KB calibrated estimate; 135,988 KB anon | Reverted; calibrated K≈11.90, source score was measured before the memory calibration change |
+| u16 cold postings | Four high-16-bit runs per cold term with sequential stable scatter | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 874.548 ms / 180,344 KB calibrated estimate; 115,832 KB anon | Reverted; K=12.833, below 1% keep threshold |
+| u16 plus dense-row cutoff | Store cold postings in u16 and choose sampled bitmap rows above N/16 | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 914.941 ms / 184,244 KB calibrated estimate; 119,732 KB anon | Reverted; K=12.486 |
+| BOOL bitmap scratch | Reuse worker bitmap storage and keep intermediate bitmap results in-place | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 804.706 ms / 203,660 KB calibrated estimate; 139,148 KB anon | Kept; K=13.211 vs 12.759 baseline; seed-1 hash and required milestone fixtures passed |
+| Compact pair runs | Compress sorted packed pairs to run headers and u16 doc IDs | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 853.751 ms / 199,668 KB calibrated estimate; 135,156 KB anon | Reverted; K=12.783 |
+| Phrase anchor positions | Precompute repeated anchor positions outside candidate-document loop | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 842.024 ms / 203,864 KB calibrated estimate; 139,352 KB anon | Reverted; K=12.861 |
+| AVX2 bitmap words | Vectorize bitmap-to-bitmap operations | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 846.286 ms / 203,576 KB calibrated estimate; 139,064 KB anon | Reverted; K=12.787 |
+| Release scan-only state | Drop query bytes and scan tables immediately after the scan | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 879.847 ms / 194,268 KB calibrated estimate; 129,756 KB anon | Reverted; K=12.752 |
+| u16 plus BOOL scratch | Combine segmented cold postings with reusable bitmap operations | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 906.902 ms / 182,000 KB calibrated estimate; 117,488 KB anon | Reverted; K=12.665 |
+| Fused final bitmap output | Combine final bitmap operation with count/sum/first-ten aggregation | RUN-ID-TBD | COMMIT-TBD | TBD / TBD / TBD / TBD | 806.028 ms / 203,512 KB calibrated estimate; 139,000 KB anon | Reverted; K=13.081 |
+
+Latest native score after Docker calibration: parse/table/setup/scan/query/output/total = 49.829 / 19.074 / 2.888 / 642.976 / 137.363 / 10.577 / 892.587 ms; local peak anon 139,156 KB; estimated cgroup peak 142,508 KB; S=998; estimated board T=0.4909 s, K=13.472, 56.47 points. The Docker run itself took 885.807 ms and measured cgroup peak 146,067,456 B. Query thread CPU before/after the kept bitmap change was BOOL list/BOOL bitmap/PHRASE = 128/679/1,004 ms → 384/259/841 ms. The BOOL bitmap and PHRASE targets and startup parse+table ≤25 ms target were not met.
 
 The historical experiment tables below remain intact. `RUN-ID-TBD` and `COMMIT-TBD` mark values the author has not supplied.
 

@@ -264,6 +264,14 @@ fn advise_will_need(address: usize, len: usize) {
 }
 #[rustfmt::skip]
 fn proc_mem() -> (u64, u64, u64) { let s=std::fs::read_to_string("/proc/self/status").unwrap_or_default(); let get=|name:&str| s.lines().find_map(|l|l.strip_prefix(name)?.split_whitespace().next()?.parse().ok()).unwrap_or(0); (get("RssAnon:"),get("VmHWM:"),get("RssFile:")) }
+fn cgroup_mem() -> (String, String, String) {
+    let read = |name: &str| std::fs::read_to_string(format!("/sys/fs/cgroup/{name}")).unwrap_or_else(|_| "unavailable".into());
+    let peak = read("memory.peak").trim().to_owned();
+    let current = read("memory.current").trim().to_owned();
+    let stat = read("memory.stat");
+    let field = |name: &str| stat.split_whitespace().collect::<Vec<_>>().windows(2).find(|x| x[0] == name).map_or("unavailable", |x| x[1]);
+    (peak, current, format!("anon={} file={} kernel={} shmem={}", field("anon"), field("file"), field("kernel"), field("shmem")))
+}
 #[repr(C)] struct RUsage([i64; 18]);
 #[rustfmt::skip]
 fn fault_snapshot() -> (i64, i64) { unsafe extern "C" { fn getrusage(who:i32, usage:*mut RUsage)->i32; } let mut r=RUsage([0;18]); /* SAFETY: RUsage is the Linux x86-64 rusage field layout and the output is a valid writable struct. */ unsafe { let _=getrusage(0,&mut r); } (r.0[8],r.0[9]) }
@@ -304,90 +312,49 @@ fn as_list(s: Set<'_>, n: usize) -> Vec<u32> {
     }
 }
 #[rustfmt::skip]
-fn bitmap_op<'a>(a: Set<'a>, b: Set<'a>, op: u8, n: usize) -> Set<'a> {
+fn bitmap_op<'a>(a: Set<'a>, b: Set<'a>, op: u8, n: usize, scratch: &mut Vec<u64>) -> Set<'a> {
     let words = (n + 63) / 64;
-    let aa = match &a {
-        Set::Bits(x) => Some(x.as_ref()),
-        _ => None,
-    };
-    let bb = match &b {
-        Set::Bits(x) => Some(x.as_ref()),
-        _ => None,
-    };
-    if aa.is_none() && bb.is_none() {
+    if matches!((&a, &b), (Set::List(_), Set::List(_))) {
         let (Set::List(x), Set::List(y)) = (a, b) else { unreachable!() };
         return Set::List(Cow::Owned(merge(x.as_ref(), y.as_ref(), op)));
     }
-    let mut out = vec![0u64; words];
-    match (aa, bb) {
-        (Some(x), Some(y)) => {
-            for i in 0..words {
-                out[i] = if op == 0 {
-                    x[i] & y[i]
-                } else if op == 1 {
-                    x[i] | y[i]
-                } else {
-                    x[i] & !y[i]
-                };
-            }
+    let (mut out, left_list) = match a {
+        Set::Bits(Cow::Owned(v)) => (v, None),
+        Set::Bits(Cow::Borrowed(v)) => { let mut out = std::mem::take(scratch); out.resize(words, 0); out.copy_from_slice(v); (out, None) }
+        Set::List(v) => { let mut out = std::mem::take(scratch); out.resize(words, 0); out.fill(0); (out, Some(v.into_owned())) }
+    };
+    match (left_list, b) {
+        (Some(left), Set::Bits(right)) => { let right = right.as_ref(); match op {
+            0 => for id in left { let i = id as usize; if right[i / 64] & (1u64 << (i % 64)) != 0 { out[i / 64] |= 1u64 << (i % 64); } },
+            1 => { out.copy_from_slice(right); for id in left { let i = id as usize; out[i / 64] |= 1u64 << (i % 64); } },
+            _ => for id in left { let i = id as usize; if right[i / 64] & (1u64 << (i % 64)) == 0 { out[i / 64] |= 1u64 << (i % 64); } },
+        }},
+        (None, Set::Bits(right)) => {
+            let right = right.as_ref();
+            for i in 0..words { out[i] = match op { 0 => out[i] & right[i], 1 => out[i] | right[i], _ => out[i] & !right[i] }; }
         }
-        (Some(x), None) => {
+        (None, Set::List(right)) => {
             if op == 0 {
-                let v = as_list(b, n);
-                for id in v {
-                    let m = 1u64 << (id % 64);
-                    if x[id as usize / 64] & m != 0 {
-                        out[id as usize / 64] |= m;
+                let mut at = 0;
+                for word in 0..words {
+                    let old = out[word]; let mut kept = 0;
+                    while at < right.len() && right[at] as usize / 64 == word {
+                        let bit = 1u64 << (right[at] % 64);
+                        if old & bit != 0 { kept |= bit; }
+                        at += 1;
                     }
+                    out[word] = kept;
                 }
             } else {
-                out.copy_from_slice(&x);
-                let v = as_list(b, n);
-                for id in v {
-                    let m = 1u64 << (id % 64);
-                    if op == 1 {
-                        out[id as usize / 64] |= m
-                    } else {
-                        out[id as usize / 64] &= !m;
-                    }
+                for &id in right.iter() {
+                    let i = id as usize; let mask = 1u64 << (i % 64);
+                    if op == 1 { out[i / 64] |= mask; } else { out[i / 64] &= !mask; }
                 }
             }
         }
-        (None, Some(y)) => {
-            if op == 1 {
-                out.copy_from_slice(&y);
-            }
-            let v = as_list(a, n);
-            for id in v {
-                let m = 1u64 << (id % 64);
-                if op == 0 {
-                    if y[id as usize / 64] & m != 0 {
-                        out[id as usize / 64] |= m
-                    }
-                } else {
-                    out[id as usize / 64] |= m;
-                }
-            }
-            if op == 2 {
-                for i in 0..words {
-                    out[i] &= !y[i];
-                }
-            }
-        }
-        _ => unreachable!(),
+        (Some(_), Set::List(_)) => unreachable!("the list/list case returned above"),
     }
-    if op == 1 {
-        let last = n % 64;
-        if last != 0 {
-            out[words - 1] &= (1u64 << last) - 1;
-        }
-    }
-    let count: usize = out.iter().map(|x| x.count_ones() as usize).sum();
-    if count < n / 64 {
-        Set::List(Cow::Owned(as_list(Set::Bits(Cow::Owned(out)), n)))
-    } else {
-        Set::Bits(Cow::Owned(out))
-    }
+    Set::Bits(Cow::Owned(out))
 }
 impl Postings {
     fn list(&self, t: usize, terms: &[Term]) -> &[u32] { &self.data[self.starts[t]..self.starts[t] + terms[t].df] }
@@ -462,14 +429,8 @@ fn anchor_mask32(bytes: &[u8], first: u8) -> u32 {
 #[rustfmt::skip]
 pub fn phrase_in_doc(data: &[u8], ids: &[usize], anchor: usize, terms: &[Term]) -> bool {
     let first = folded(terms[anchor].bytes[0]);
-    let mut anchor_positions = [0usize; 8];
-    let mut count = 0;
-    for (i, &id) in ids.iter().enumerate() {
-        if id == anchor {
-            anchor_positions[count] = i;
-            count += 1;
-        }
-    }
+    let mut anchor_positions = [0usize; 8]; let mut count = 0;
+    for (i, &id) in ids.iter().enumerate() { if id == anchor { anchor_positions[count] = i; count += 1; } }
     let mut base = 0;
     while base < data.len() {
         if base + 32 <= data.len() {
@@ -723,6 +684,7 @@ fn eval_query(
     docs: &[u8],
     line_starts: &[u32],
     n: usize,
+    bitmap_scratch: &mut Vec<u64>,
 ) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
     match q {
@@ -730,9 +692,15 @@ fn eval_query(
             let ids = &query_ids[id_range.clone()]; let ops = &query_ops[op_range.clone()];
             let mut r = term_set(ids[0], terms, posts, bits, n);
             for (i, &t) in ids.iter().enumerate().skip(1) {
-                r = bitmap_op(r, term_set(t, terms, posts, bits, n), ops[i - 1], n);
+                r = bitmap_op(r, term_set(t, terms, posts, bits, n), ops[i - 1], n, bitmap_scratch);
             }
-            output_set(r, n, &mut out);
+            match r {
+                Set::Bits(Cow::Owned(words)) => {
+                    output_set(Set::Bits(Cow::Borrowed(&words)), n, &mut out);
+                    *bitmap_scratch = words;
+                }
+                other => output_set(other, n, &mut out),
+            }
         }
         Query::Phrase(range) => {
             let ids = &query_ids[range.clone()];
@@ -869,10 +837,10 @@ fn main() -> io::Result<()> {
         let handles: Vec<_> = (0..workers.min(qlen.max(1))).map(|_| {
             let (ts, qi, qo, ps, bm, starts) = (&terms, &query_ids, &query_ops, &postings, bits, &line_starts); let next = &next; let qs = &queries;
             scope.spawn(move || {
-                let mut blocks = Vec::new(); loop {
+                let mut blocks = Vec::new(); let mut bitmap_scratch = Vec::new(); loop {
                     let s = next.fetch_add(BLOCK, Ordering::Relaxed); if s >= qlen { break; }
                     let mut part = Vec::new();
-                    for q in &qs[s..(s + BLOCK).min(qlen)] { part.extend_from_slice(&eval_query(q, qi, qo, ts, ps, bm, docs, starts, n)); }
+                    for q in &qs[s..(s + BLOCK).min(qlen)] { part.extend_from_slice(&eval_query(q, qi, qo, ts, ps, bm, docs, starts, n, &mut bitmap_scratch)); }
                     blocks.push((s / BLOCK, part));
                 } blocks
             })
@@ -881,6 +849,6 @@ fn main() -> io::Result<()> {
         blocks.sort_unstable_by_key(|x| x.0); blocks.into_iter().flat_map(|x| x.1).collect::<Vec<u8>>()
     });
     tick!(5); snap!("query_complete"); std::fs::create_dir_all(output)?; std::fs::write(Path::new(output).join("results.txt"), out)?;
-    if timing { phases[6] = lap.elapsed().as_micros(); let rss=proc_mem(); eprintln!("SD_TIMING read={} query_parse={} parse={} table={} scan_a={} setup={} scan_b={} queries={} output={} total={} rss_anon_kb={} vmhwm_kb={} rss_file_kb={} scan_minor={} scan_major={} workers={:?}",query_read,query_parse,phases[0],phases[1],phases[2],phases[3],phases[4],phases[5],phases[6],total.elapsed().as_micros(),rss.0,rss.1,rss.2,scan_faults.0,scan_faults.1,worker_times); }
+    if timing { phases[6] = lap.elapsed().as_micros(); let rss=proc_mem(); eprintln!("SD_TIMING read={} query_parse={} parse={} table={} scan_a={} setup={} scan_b={} queries={} output={} total={} rss_anon_kb={} vmhwm_kb={} rss_file_kb={} scan_minor={} scan_major={} workers={:?}",query_read,query_parse,phases[0],phases[1],phases[2],phases[3],phases[4],phases[5],phases[6],total.elapsed().as_micros(),rss.0,rss.1,rss.2,scan_faults.0,scan_faults.1,worker_times); let (peak,current,stat)=cgroup_mem(); eprintln!("SD_CGROUP memory_peak={} memory_current={} {}",peak,current,stat); }
     std::process::exit(0)
 }
