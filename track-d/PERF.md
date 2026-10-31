@@ -9,8 +9,10 @@ Every step from the reference to your final version, each with the live-board ru
 | 2 | Cheap reachability shortcuts ($s == t$, $\text{out\_deg}(s) == 0$, $\text{in\_deg}(t) == 0$) [duplicate cache ablated] | run-1db5b0ec6c38 | 1.327 (board) / 4.45 (local) | 229 (board) / 246 (local) | 7.229 (board) |
 | 3 | Step B + Step A: Compact per-query state (open-addressing) + 4-ary heap + shared atomic degrees (2-pass zero-intermediate build) + interleaved edges | run-353ba4da0058 | 0.864 (board) / 3.68 (local) | 216 (board) / 234 (local) | 8.29 (board) |
 | 4 | Memory shrinkers (table/heap trim, glibc mallopt, serialized fallback) + rustfmt line compression | run-d23d9f28a10b | 0.955 (board) / 3.81 (local) | 90 (board) / 171 (local) | 48.839 (board, K 9.4796, 524 lines) |
+| 5 | Two-tier prefetch: prefetch `offsets[v]` at push time (replacing the blocking load) + prefetch the next heap top's adjacency after each pop. Interleaved local A/B: -26.3% total vs Step 4 | run-7d0ef3aae3db | 0.800 (board) / not measured | 90 (board) / not measured | 50.745 (board, K 10.3489, 531 lines) |
+| 6 | Packed 4-byte edges (runtime bit split $T_{\text{bits}} = 32 - (n-1)\text{.leading\_zeros()}$, escape word for weights \ge 2^{W_{\text{bits}}} - 1). Local 12-worker A/B total 2,936 ms vs 3,034 ms for Step 5, peak anon 63.0 MB vs 81.2 MB, 1-worker 246 ns/node vs 258 ns, formatted lines 576 | run-TBD | TBD (board) | TBD (board) | TBD (board) |
 
-*Note: Step 0 numbers (72.69 s, 893 MB) are the organisers' official scoring-box baseline. Steps 1-4 include official live board measurements (Step 4: 0.955 s, 90 MB, 524 lines, K 9.4796, 48.839 points).*
+*Note: Step 0 numbers (72.69 s, 893 MB) are the organisers' official scoring-box baseline. Steps 1-5 include official live board measurements (Step 4: 0.955 s, 90 MB, 524 lines, K 9.4796, 48.839 points; Step 5: 0.800 s, 90 MB, 531 lines, K 10.3489, 50.745 points).*
 
 ---
 
@@ -93,6 +95,81 @@ To prevent memory expansion across 12 worker threads during the query phase:
   - Memory rounding overhead: $+3.04\text{ MB}$ (modest).
   - Line count cost: $+45$ formatted lines (`HugeBuf` struct, aligned allocation, `madvise`, `Deref`, `DerefMut`, `Drop`).
 - **Decision**: **RETAINED IN TOOLS**. The 2.3% net wall-clock speedup is offset by the +45 lines penalty on $S^{0.15}$ under the current live board score, making it neutral to slightly negative for overall $K$.
+
+#### E. Parallel Ball-Clustering Node Ordering Prototype (`tools/track-d/profiler/src/bin/ball_clustering.rs`)
+- **Design**: Partitioned nodes into thread slices. Each thread concurrently scans its slice for unclaimed seeds and grows BFS balls of $B$ nodes ($B \in \{128, 256, 512\}$) via atomic CAS claims and thread-local queues. Prefix-summed ball sizes to allocate contiguous ID blocks in BFS order, copied adjacency lists into the new order, remapped edge targets in parallel, and remapped query endpoints.
+- **12-Worker Performance Evaluation (Full Seed 1, 9 Interleaved Rounds)**:
+  - **Current Code ($B=0$)**: Build **699.53 ms** | Query **2,396.75 ms** | Total **3,082.15 ms** | Peak Anon **82.81 MB** | 1-worker: **254.3 ns / node**
+  - **Ball-Clustering $B=128$**: Build **993.60 ms** (Order 125.99 ms + Remap 149.99 ms) | Query **1,770.06 ms** (-26.15%) | Total **2,724.18 ms** (-11.61%) | Peak Anon **103.35 MB** | 1-worker: **196.9 ns / node**
+  - **Ball-Clustering $B=256$**: Build **971.97 ms** (Order 129.29 ms + Remap 152.31 ms) | Query **1,715.07 ms** (-28.44%) | Total **2,711.19 ms** (-12.04%) | Peak Anon **103.34 MB** | 1-worker: **208.3 ns / node**
+  - **Ball-Clustering $B=512$**: Build **973.18 ms** (Order 128.60 ms + Remap 145.38 ms) | Query **1,739.15 ms** (-27.44%) | Total **2,708.74 ms** (-12.12%) | Peak Anon **103.34 MB** | 1-worker: **187.9 ns / node**
+- **Correctness**: 0 mismatches across all 9 rounds and all configurations. Every run verified SHA-256 `a23dbdf0a3e49cc8901310a9ee1dc6a9a569a85297b6da75c2a7002cb2ed277e`.
+- **Decision**: **REJECTED**. Although the query phase is 27-28% faster and 1-worker rate improves by up to 26%, the ~274 ms ordering and remap overhead in the build phase limits net total time reduction to −12% (3,082 ms $\to$ 2,709 ms). Together with +20.5 MB peak anonymous memory from retaining dual graph structures during remapping, the estimated net score gain is negligible (computed $K \approx +0.6\%$), failing the $\ge 25\%$ net speedup gate. Retained in `tools/track-d/` only.
+
+#### F. Interleaved Multi-Query Execution Prototype (`tools/track-d/profiler/src/bin/interleaved_packed.rs`)
+- **Design**: Evaluated hiding memory access latency by having each worker thread concurrently progress $N$ independent Dijkstra searches ($N \in \{1, 2, 4, 8\}$) as resumable step-state objects (`CompactDist`, `QuadHeap`, query bounds). Workers step searches round-robin, advancing 1 heap pop and outgoing edge relaxations per step, while keeping 2-tier prefetching active and serialized fallback as a blocking routine.
+- **12-Worker Performance Evaluation (Full Seed 1, 9 Interleaved Rounds)**:
+  - **Baseline ($N=1$, 8-byte edges)**: Build **722.6 ms** | Query **2,304.3 ms** | Total **3,021.8 ms** | Peak Anon **83.60 MB** | 1-worker: **258.0 ns / node**
+  - **Interleaved $N=2$**: Build **706.5 ms** | Query **2,708.3 ms** (+17.5%) | Total **3,467.7 ms** | Peak Anon **100.46 MB** (+16.9 MB) | 1-worker: **295.7 ns / node**
+  - **Interleaved $N=4$**: Build **703.2 ms** | Query **3,203.1 ms** (+39.0%) | Total **3,918.6 ms** | Peak Anon **136.51 MB** (+52.9 MB) | 1-worker: **342.5 ns / node**
+- **Spread & Formula Evaluation**:
+  - The query time slowdown of +17.5% ($N=2$) and +39.0% ($N=4$) strictly exceeds the baseline spread with zero range overlap ($2,708\text{ ms} > 2,304\text{ ms}$).
+  - Computed $K$ metric drops from baseline ~10.35 down to **8.78 (-15.2%)** for $N=2$ and **7.89 (-23.8%)** for $N=4$.
+- **Analysis**: Round-robin context switching across $N$ active searches per worker destroys L1/L2 cache locality: each search's `CompactDist` hash table and heap continually evict those of neighboring searches. Concurrently holding $12 \times N$ active allocations also inflates peak anonymous memory from 83.6 MB up to 136.5 MB.
+- **Decision**: **REJECTED**. Retained in `tools/track-d/` only.
+
+#### G. Packed 4-byte Edge Layout (`track-d/src/main.rs`)
+- **Design**: Replaced 8-byte edge representation `(u32 target, u32 weight)` with a dynamic packed 4-byte edge word (`u32`). Target bits are computed at runtime from $n$: $T_{\text{bits}} = 32 - (n - 1)\text{.leading\_zeros()}$, with remaining bits assigned to weight $W_{\text{bits}} = 32 - T_{\text{bits}}$. For $n = 1,740,512$, $T_{\text{bits}} = 21$ and $W_{\text{bits}} = 11$. Edge weights $< 2^{11} - 1 = 2047$ pack $(v \ll 11) | w$ into a single 4-byte word. Large weights use escape code $2^{11} - 1$ followed by the full $u32$ weight in the next word. Built in a lock-free two-pass parallel pipeline with zero intermediate vectors.
+- **12-Worker Performance Evaluation (Full Seed 1, 9 Interleaved Rounds vs Step 5)**:
+  - **Step 5 Baseline (8-byte edges)**: Build **734.2 ms** (±200.1) | Query **2,296.8 ms** [2,179.1..2,980.3] | Total **3,034.2 ms** [2,844.0..4,028.9] | Peak Anon **81.15 MB**
+  - **Integrated (Packed 4-byte edges)**: Build **726.3 ms** (±187.5) | Query **2,231.2 ms** [2,009.1..2,478.5] | Total **2,936.3 ms** [2,794.8..3,485.0] | Peak Anon **63.00 MB (-18.15 MB / -22.4%)**
+  - **1-Worker Rate**: Query rate improved from $258.0\text{ ns / node}$ down to **$246.3\text{ ns / node}$** (-4.5% rate speedup) due to doubled cache line density (16 edges per 64-byte line vs 8 edges).
+- **Line Count & Scoring Impact**:
+  - `track-d/src/main.rs`: 568 code lines. Dockerfile: 8 code lines. Total code lines = **576 lines** (net delta of only **+45 lines** vs Step 4).
+  - Score formula impact: The -18.15 MB (-22.4%) memory reduction and -98 ms total time reduction far outweigh the minor $S^{0.15}$ cost (+45 lines = -1.2%), yielding an estimated net $K$ increase of **+4.9% to +6.3%** ($K \approx 10.65 - 10.82$).
+- **Verification**: Verified across empty, single-node, $m=0$, tiny/sample seeds 1, 2, 3, 7, full seeds 1, 2, 3, 5 with 5 repeats across 1, 4, 12 workers, tiny capacity (`INIT=16, MAX=32`), and 50 stress tests with critical weights (2046, 2047, $u32::\text{MAX}$, $n > 2^{21}$).
+- **Decision**: **INTEGRATED INTO PRODUCTION (`track-d/src/main.rs`)**.
+
+#### H. Radix Heap Priority Queue Prototype (`tools/track-d/profiler/src/bin/radix_heap.rs`)
+- **Design**: Prototyped a 33-bucket monotone Radix Heap replacing the 4-ary heap for the fast path ($d < 2^{32}$). Utilizes bitwise XOR with `last` popped distance for $O(1)$ amortized push (`b = 32 - (d ^ last).leading_zeros()`) and lazy bucket redistribution during pops, with a 64-bit integer bitmask (`non_empty`) for $O(1)$ non-empty bucket discovery (`trailing_zeros()`). Distances $\ge 2^{32}$ continue to route through the serialized 64-bit `fallback_dijkstra` QuadHeap.
+- **1-Worker Performance Evaluation (Full Seed 1, 2,000 Queries)**:
+  - **QuadHeap (1 worker)**: Query **6,134.6 ms** | Settled 24,908,654 | Rate = **246.28 ns / settled node**
+  - **RadixHeap (1 worker)**: Query **4,709.3 ms** (-23.2%) | Settled 24,910,117 | Rate = **189.05 ns / settled node (-23.2% faster!)**
+- **12-Worker Performance Evaluation (Full Seed 1, 9 Interleaved Rounds)**:
+  - **Integrated QuadHeap**: Build **739.0 ms** (±47.7) | Query **2,198.9 ms** [2,126.0..2,326.0] | Total **2,975.7 ms** [2,838.8..3,059.0] | Peak Anon **62.11 MB**
+  - **RadixHeap Prototype**: Build **719.5 ms** (±64.7) | Query **1,863.3 ms** [1,764.8..1,919.6] (-15.3%) | Total **2,583.0 ms** [2,497.5..2,644.9] (-13.2%) | Peak Anon **64.52 MB** (+2.41 MB)
+  - **Spread Separation**: The speedup strictly exceeds the spread with **zero overlap** — the slowest RadixHeap total run ($2,644.9\text{ ms}$) is strictly faster than the fastest QuadHeap total run ($2,838.8\text{ ms}$) by nearly $200\text{ ms}$.
+- **Line Cost & Net Score Estimate**:
+  - Line count in `src/main.rs`: 663 lines (+95 lines over 568-line integrated build). Total code lines: 671 lines.
+  - Net $K$ estimate: +13.2% faster total time against a +2.3% line penalty ($671^{0.15} / 576^{0.15} = 1.0232$) yields a net **+10.7% score improvement** ($K \approx 11.8 - 12.0$).
+- **Decision**: **VALIDATED AND RETAINED IN `tools/track-d/` ONLY**. Superseded by unified 64-bit line-trimmed Radix Everywhere prototype below.
+
+#### I. Unified Line-Trimmed Radix Everywhere Prototype (`tools/track-d/candidates/radix_everywhere.rs`)
+- **Design**: Completely eliminated `QuadHeap` and `HeapItem` everywhere from the codebase, replacing both the fast path and `fallback_dijkstra` with a single unified 65-bucket `RadixHeap` handling full 64-bit distances (`u64`). Utilizes a 128-bit integer bitmask (`non_empty: u128`) for $O(1)$ non-empty bucket discovery (`trailing_zeros()`) and monotone bucket redistribution on pops.
+- **Formatted Line Count Impact**:
+  - Integrated build (`track-d/src/main.rs`): **568 code lines** (620 total lines; 576 code lines including Dockerfile).
+  - Radix everywhere (`tools/track-d/candidates/radix_everywhere.rs`): **599 code lines** (653 total lines; 607 code lines including Dockerfile).
+  - Net formatted line delta: **+31 code lines** (well within the $\le +50$ line gate requirement).
+- **1-Worker Rate Evaluation (Full Seed 1, 2,000 Queries)**:
+  - **QuadHeap (1 worker)**: Query **6,940.43 ms** | Settled 24,908,654 | Rate = **278.64 ns / settled node**
+  - **RadixHeap (1 worker)**: Query **6,049.15 ms** (-12.8%) | Settled 24,910,117 | Rate = **242.84 ns / settled node (-35.80 ns / node)**
+- **12-Worker Performance Evaluation (Full Seed 1, 9 Interleaved Rounds, Shipped Flags)**:
+  - **QuadHeap Baseline**: Build **766.78 ms** (±268.4) | Query **2,223.75 ms** [2,098.6..3,094.1] | Total **2,973.32 ms** [2,791.8..4,046.4] | Peak Anon **62.05 MB** | 12-worker rate **89.27 ns / node**
+  - **Radix Everywhere**: Build **764.12 ms** (±256.3) | Query **1,941.09 ms** [1,813.6..2,038.5] (-12.7%) | Total **2,682.42 ms** [2,581.5..2,915.4] (-9.8%) | Peak Anon **69.23 MB** (+7.18 MB) | 12-worker rate **77.92 ns / node**
+- **Overlap & Formula Score Evaluation**:
+  - **Query Time Overlap**: Zero overlap — slowest Radix query run (2,038.5 ms) was strictly faster than fastest QuadHeap query run (2,098.6 ms).
+  - **Total Time Overlap**: Baseline range [2,791.8, 4,046.4] ms overlaps with Radix range [2,581.5, 2,915.4] ms by **123.62 ms** (overlap test FAILS).
+  - **Scoring Formula Impact ($T^{-0.5} \cdot M^{-0.2} \cdot S^{-0.15}$)**:
+    - Time factor $(2.9733 / 2.6824)^{0.5} = 1.0528$ (+5.28%)
+    - Memory factor $(62.05 / 69.23)^{0.2} = 0.9783$ (-2.17% penalty from 12 workers $\times$ 65 buckets)
+    - Size factor $(568 / 599)^{0.15} = 0.9921$ (-0.79% penalty)
+    - Relative $K$ multiplier = $1.0528 \times 0.9783 \times 0.9921 = 1.0218$ (**+2.18% net $K$**).
+- **Gate Assessment ($\le +50$ lines, zero overlap, net $K \ge +3\%$)**:
+  - Lines delta: $+31$ lines (**PASS**)
+  - Zero total time overlap: Overlap = 123.62 ms (**FAIL**)
+  - Net $K \ge +3\%$: $+2.18\%$ (**FAIL**)
+  - Overall Gate Status: **FAILED**.
+- **Decision**: **REJECTED FROM PRODUCTION INTEGRATION**. Retained in `tools/track-d/` only. Because the gate failed, multi-seed full verification was not run and the unified radix implementation is kept strictly within `tools/track-d/`. `track-d/src/main.rs` retains the proven QuadHeap layout.
 
 ### 4. Parameter Sweep: `INIT_CAP` & Shrink Threshold
 Evaluated all 12 combinations of initial table capacity `INIT_CAP` $\in [16\text{k}, 32\text{k}, 64\text{k}, 128\text{k}]$ and per-query reset shrink threshold `SHRINK_THRESH` $\in [\text{never}, 256\text{k}, 512\text{k}]$. Each cell reports the median of 5 runs at 12 workers, internal total time, 1-worker query rate (ns/settled node), and 5 ms sampled peak anonymous memory (`Pss_Anon`) during queries.

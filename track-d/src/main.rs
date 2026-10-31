@@ -21,7 +21,6 @@ struct Mapping {
     len: usize,
 }
 
-// SAFETY: Mapping owns the mmap allocation and raw pointer, safe to send and share.
 unsafe impl Send for Mapping {}
 unsafe impl Sync for Mapping {}
 
@@ -36,7 +35,6 @@ impl Mapping {
                 len: 0,
             };
         }
-        // SAFETY: MAP_PRIVATE (2) with PROT_READ (1). Valid fd and length.
         let ptr = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, file.as_raw_fd(), 0) };
         assert_ne!(ptr as isize, -1, "mmap failed");
         Self { ptr, len }
@@ -47,7 +45,6 @@ impl Mapping {
         if self.len == 0 {
             &[]
         } else {
-            // SAFETY: self.ptr points to self.len valid readable bytes mapped from the input file.
             unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
         }
     }
@@ -56,7 +53,6 @@ impl Mapping {
 impl Drop for Mapping {
     fn drop(&mut self) {
         if self.len != 0 {
-            // SAFETY: self.ptr was returned by mmap and is unmapped exactly once upon drop.
             unsafe {
                 munmap(self.ptr, self.len);
             }
@@ -74,10 +70,6 @@ unsafe fn parse_u32_raw(ptr: *const u8, pos: &mut usize) -> u32 {
     }
     n
 }
-
-#[derive(Copy, Clone)]
-#[repr(C)]
-struct Edge(u32, u32);
 
 #[derive(Copy, Clone)]
 struct Slot(u32, u32);
@@ -101,7 +93,6 @@ impl CompactDist {
     fn get(&self, node: u32) -> u32 {
         let mut i = (node as usize).wrapping_mul(0x9E3779B9) & self.mask;
         loop {
-            // SAFETY: i is masked by self.mask < self.slots.len().
             let s = unsafe { self.slots.get_unchecked(i) };
             if s.0 == node {
                 return s.1;
@@ -143,7 +134,6 @@ impl CompactDist {
         }
         let mut i = (node as usize).wrapping_mul(0x9E3779B9) & self.mask;
         loop {
-            // SAFETY: i is masked by self.mask < self.slots.len().
             let s = unsafe { self.slots.get_unchecked_mut(i) };
             if s.0 == node {
                 if new_dist < s.1 {
@@ -164,7 +154,6 @@ impl CompactDist {
     #[inline(always)]
     fn clear_and_shrink(&mut self) {
         for &idx in &self.touched {
-            // SAFETY: idx in self.touched is a valid slot index populated in try_relax/grow.
             unsafe {
                 *self.slots.get_unchecked_mut(idx) = Slot(EMPTY_SLOT, INF32);
             }
@@ -245,10 +234,12 @@ fn fallback_dijkstra(
     t: u32,
     n: u32,
     offsets: &[u32],
-    edges: &[Edge],
+    edges: &[u32],
+    w_bits: u32,
+    w_mask: u32,
+    escape_w: u32,
     heap: &mut QuadHeap,
 ) -> u64 {
-    // SAFETY: Cap concurrent fallbacks to 1 so at most 1 temporary 14 MB distance vector exists.
     while FALLBACK_LOCK.swap(true, Ordering::Acquire) {
         std::hint::spin_loop();
     }
@@ -265,15 +256,22 @@ fn fallback_dijkstra(
             ans = d;
             break;
         }
-        let start = offsets[u as usize] as usize;
+        let mut i = offsets[u as usize] as usize;
         let end = offsets[u as usize + 1] as usize;
-        for i in start..end {
-            // SAFETY: i is within valid edge range.
-            let e = unsafe { edges.get_unchecked(i) };
-            let nd = d + e.1 as u64;
-            if nd < dist[e.0 as usize] {
-                dist[e.0 as usize] = nd;
-                heap.push(nd, e.0);
+        while i < end {
+            let p = unsafe { *edges.get_unchecked(i) };
+            let v = p >> w_bits;
+            let wf = p & w_mask;
+            let (w, step) = if wf != escape_w {
+                (wf as u64, 1)
+            } else {
+                (unsafe { *edges.get_unchecked(i + 1) as u64 }, 2)
+            };
+            i += step;
+            let nd = d + w;
+            if nd < dist[v as usize] {
+                dist[v as usize] = nd;
+                heap.push(nd, v);
             }
         }
     }
@@ -288,9 +286,9 @@ fn fallback_dijkstra(
 
 fn main() {
     unsafe {
-        mallopt(-1, 65536); // M_TRIM_THRESHOLD
-        mallopt(-3, 65536); // M_MMAP_THRESHOLD
-        mallopt(-8, 2); // M_ARENA_MAX
+        mallopt(-1, 65536);
+        mallopt(-3, 65536);
+        mallopt(-8, 2);
     }
 
     let mut args = std::env::args_os().skip(1);
@@ -313,7 +311,6 @@ fn main() {
 
     let mut h_pos = 0;
     let h_ptr = header.as_ptr();
-    // SAFETY: header contains ASCII 'n m' formatted digits followed by newline.
     let n = unsafe { parse_u32_raw(h_ptr, &mut h_pos) };
     h_pos += 1;
     let m = unsafe { parse_u32_raw(h_ptr, &mut h_pos) };
@@ -328,14 +325,22 @@ fn main() {
     bounds.push(0);
     for i in 1..num_threads {
         let mut p = edges_data.len() * i / num_threads;
-        while p < edges_data.len() && edges_data[p - 1] != b'\n' {
+        while p < edges_data.len() && edges_data[p] != b'\n' {
+            p += 1;
+        }
+        if p < edges_data.len() {
             p += 1;
         }
         bounds.push(p);
     }
     bounds.push(edges_data.len());
 
-    let degrees = (0..n).map(|_| AtomicU32::new(0)).collect::<Vec<_>>();
+    let target_bits = 32 - (n.saturating_sub(1)).leading_zeros();
+    let w_bits = 32 - target_bits;
+    let w_mask = (1u32 << w_bits) - 1;
+    let escape_w = w_mask;
+
+    let degrees: Vec<AtomicU32> = (0..n).map(|_| AtomicU32::new(0)).collect();
 
     thread::scope(|scope| {
         for i in 0..num_threads {
@@ -351,17 +356,21 @@ fn main() {
                         cur += 1;
                         continue;
                     }
-                    // SAFETY: cur is verified < slice.len() and points to digit.
                     let u = unsafe { parse_u32_raw(ptr, &mut cur) };
-                    // SAFETY: u < n as guaranteed by graph specification.
-                    let deg = unsafe { degrees.get_unchecked(u as usize) };
-                    deg.fetch_add(1, Ordering::Relaxed);
+                    cur += 1;
+                    while cur < slice.len() && slice[cur] != b' ' && slice[cur] != b'\t' {
+                        cur += 1;
+                    }
+                    cur += 1;
+                    let w = unsafe { parse_u32_raw(ptr, &mut cur) };
                     while cur < slice.len() && slice[cur] != b'\n' {
                         cur += 1;
                     }
                     if cur < slice.len() {
                         cur += 1;
                     }
+                    let deg = unsafe { degrees.get_unchecked(u as usize) };
+                    deg.fetch_add(if w < escape_w { 1 } else { 2 }, Ordering::Relaxed);
                 }
             });
         }
@@ -379,7 +388,7 @@ fn main() {
     let write_pos = (0..n)
         .map(|u| AtomicU32::new(offsets[u as usize]))
         .collect::<Vec<_>>();
-    let mut edges = vec![Edge(0, 0); sum as usize];
+    let mut edges = vec![0u32; sum as usize];
     let edges_ptr = edges.as_mut_ptr() as usize;
 
     thread::scope(|scope| {
@@ -391,13 +400,12 @@ fn main() {
                 let slice = &edges_data[start..end];
                 let ptr = slice.as_ptr();
                 let mut cur = 0;
-                let e_ptr = edges_ptr as *mut Edge;
+                let e_ptr = edges_ptr as *mut u32;
                 while cur < slice.len() {
                     if slice[cur] == b'\n' || slice[cur] == b'\r' {
                         cur += 1;
                         continue;
                     }
-                    // SAFETY: cur is bounds-checked and points to digit.
                     let u = unsafe { parse_u32_raw(ptr, &mut cur) };
                     cur += 1;
                     let v = unsafe { parse_u32_raw(ptr, &mut cur) };
@@ -406,11 +414,18 @@ fn main() {
                     while cur < slice.len() && (slice[cur] == b'\r' || slice[cur] == b'\n') {
                         cur += 1;
                     }
-                    // SAFETY: u < n guaranteed by spec; write_pos partition allocates unique slot < sum.
                     let wp = unsafe { write_pos.get_unchecked(u as usize) };
-                    let p = wp.fetch_add(1, Ordering::Relaxed);
-                    unsafe {
-                        *e_ptr.add(p as usize) = Edge(v, w);
+                    if w < escape_w {
+                        let p = wp.fetch_add(1, Ordering::Relaxed) as usize;
+                        unsafe {
+                            *e_ptr.add(p) = (v << w_bits) | w;
+                        }
+                    } else {
+                        let p = wp.fetch_add(2, Ordering::Relaxed) as usize;
+                        unsafe {
+                            *e_ptr.add(p) = (v << w_bits) | escape_w;
+                            *e_ptr.add(p + 1) = w;
+                        }
                     }
                 }
             });
@@ -422,8 +437,14 @@ fn main() {
     }
 
     let mut has_in = vec![false; n as usize];
-    for e in &edges {
-        has_in[e.0 as usize] = true;
+    let mut i = 0;
+    while i < edges.len() {
+        let p = edges[i];
+        let v = (p >> w_bits) as usize;
+        if v < n as usize {
+            has_in[v] = true;
+        }
+        i += if (p & w_mask) == escape_w { 2 } else { 1 };
     }
 
     let q_data = queries_map.bytes();
@@ -437,7 +458,6 @@ fn main() {
         if q_pos >= q_data.len() {
             break;
         }
-        // SAFETY: q_pos < q_data.len() and points to digit.
         let s = unsafe { parse_u32_raw(q_ptr, &mut q_pos) };
         q_pos += 1;
         let t = unsafe { parse_u32_raw(q_ptr, &mut q_pos) };
@@ -513,22 +533,29 @@ fn main() {
                                 ans = d;
                                 break;
                             }
-                            let start = offsets[u as usize] as usize;
+                            let mut i = offsets[u as usize] as usize;
                             let end = offsets[u as usize + 1] as usize;
-                            for i in start..end {
-                                // SAFETY: i is within valid edge range.
-                                let e = unsafe { edges.get_unchecked(i) };
-                                let nd = d + e.1 as u64;
+                            while i < end {
+                                let p = unsafe { *edges.get_unchecked(i) };
+                                let v = p >> w_bits;
+                                let wf = p & w_mask;
+                                let (w, step) = if wf != escape_w {
+                                    (wf as u64, 1)
+                                } else {
+                                    (unsafe { *edges.get_unchecked(i + 1) as u64 }, 2)
+                                };
+                                i += step;
+                                let nd = d + w;
                                 if nd >= INF32 as u64 {
                                     need_fallback = true;
                                     break;
                                 }
-                                match compact.try_relax(e.0, nd as u32) {
+                                match compact.try_relax(v, nd as u32) {
                                     Some(true) => {
-                                        heap.push(nd, e.0);
+                                        heap.push(nd, v);
                                         unsafe {
                                             std::arch::x86_64::_mm_prefetch(
-                                                offsets.as_ptr().add(e.0 as usize) as *const i8,
+                                                offsets.as_ptr().add(v as usize) as *const i8,
                                                 std::arch::x86_64::_MM_HINT_T0,
                                             );
                                         }
@@ -549,7 +576,9 @@ fn main() {
                         heap.clear_and_shrink();
 
                         if need_fallback {
-                            ans = fallback_dijkstra(s, t, n, offsets, edges, &mut heap);
+                            ans = fallback_dijkstra(
+                                s, t, n, offsets, edges, w_bits, w_mask, escape_w, &mut heap,
+                            );
                         }
 
                         results[idx].store(ans, Ordering::Relaxed);
