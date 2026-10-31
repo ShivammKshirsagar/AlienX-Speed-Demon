@@ -1,0 +1,22 @@
+[package]
+name = "ab_bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "step4_current"
+path = "src/bin/step4_current.rs"
+
+[[bin]]
+name = "step4_prefetch_offset"
+path = "src/bin/step4_prefetch_offset.rs"
+
+[[bin]]
+name = "step4_pop_prefetch"
+path = "src/bin/step4_pop_prefetch.rs"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
