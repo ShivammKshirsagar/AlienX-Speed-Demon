@@ -3,6 +3,7 @@ data/
 
 # Rust build artifacts for Track A.
 /track-a/target/
+/track-d/target/
 
 # Generated Track A verification and benchmark files.
 /tools/track-a/data/
