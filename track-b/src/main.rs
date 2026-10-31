@@ -31,15 +31,14 @@ fn folded(x: u8) -> u8 {
 fn is_word(x: u8) -> bool {
     x >= b'a' && x <= b'z' || x >= b'0' && x <= b'9'
 }
+fn hash_bytes(raw: &[u8]) -> u64 {
+    raw.iter().fold(0xcbf29ce484222325, |h, &x| (h ^ folded(x) as u64).wrapping_mul(0x100000001b3))
+}
 fn lookup(terms: &[Term], slots: &[u32], raw: &[u8]) -> Option<usize> {
     if raw.is_empty() {
         return None;
     }
-    let mut h = 0xcbf29ce484222325u64;
-    for &x in raw {
-        let y = folded(x);
-        h = (h ^ y as u64).wrapping_mul(0x100000001b3);
-    }
+    let h = hash_bytes(raw);
     let mut p = h as usize & (slots.len() - 1);
     loop {
         let v = slots[p];
@@ -57,10 +56,7 @@ fn lookup(terms: &[Term], slots: &[u32], raw: &[u8]) -> Option<usize> {
     }
 }
 fn intern(raw: &[u8], terms: &mut Vec<Term>, slots: &mut Vec<u32>) -> usize {
-    let mut h = 0xcbf29ce484222325u64;
-    for &x in raw {
-        h = (h ^ x as u64).wrapping_mul(0x100000001b3);
-    }
+    let h = raw.iter().fold(0xcbf29ce484222325, |h, &x| (h ^ x as u64).wrapping_mul(0x100000001b3));
     let mut p = h as usize & (slots.len() - 1);
     loop {
         let v = slots[p];
