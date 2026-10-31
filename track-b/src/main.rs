@@ -2,7 +2,7 @@
 use std::{fs::File, io, os::fd::AsRawFd, path::Path, sync::atomic::{AtomicU64, AtomicUsize, Ordering}, time::Instant};
 
 pub struct Term {
-    bytes: Vec<u8>,
+    pub bytes: Vec<u8>,
     hash: u64,
     df: usize,
     bitmap: bool,
@@ -262,6 +262,11 @@ fn advise_will_need(address: usize, len: usize) {
     // SAFETY: the address and length describe a live read-only mmap retained by main; MADV_WILLNEED does not modify it.
     unsafe { let _ = madvise(address as *mut c_void, len, 3); }
 }
+#[rustfmt::skip]
+fn proc_mem() -> (u64, u64, u64) { let s=std::fs::read_to_string("/proc/self/status").unwrap_or_default(); let get=|name:&str| s.lines().find_map(|l|l.strip_prefix(name)?.split_whitespace().next()?.parse().ok()).unwrap_or(0); (get("RssAnon:"),get("VmHWM:"),get("RssFile:")) }
+#[repr(C)] struct RUsage([i64; 18]);
+#[rustfmt::skip]
+fn fault_snapshot() -> (i64, i64) { unsafe extern "C" { fn getrusage(who:i32, usage:*mut RUsage)->i32; } let mut r=RUsage([0;18]); /* SAFETY: RUsage is the Linux x86-64 rusage field layout and the output is a valid writable struct. */ unsafe { let _=getrusage(0,&mut r); } (r.0[8],r.0[9]) }
 fn merge(a: &[u32], b: &[u32], op: u8) -> Vec<u32> {
     let mut out = Vec::with_capacity(if op == 1 { a.len() + b.len() } else { a.len().min(b.len()) });
     let (mut i, mut j) = (0, 0);
@@ -597,9 +602,12 @@ fn sample_hot(docs: &[u8], terms: &[Term], table: &ScanTable) -> Vec<usize> {
 }
 struct WorkerScan {
     counts: Vec<u32>,
-    pairs: Vec<(u32, u32)>,
+    pairs: PairBuffer,
+    doc_base: u32,
     rows: usize,
+    elapsed_us: u128,
 }
+enum PairBuffer { Packed(Vec<u32>), Full(Vec<(u32, u32)>) }
 #[rustfmt::skip]
 fn scan_onepass(
     docs: &[u8],
@@ -617,14 +625,21 @@ fn scan_onepass(
     let mut state = vec![(u32::MAX, 0u32); terms.len()];
     let mut hot_last = vec![u32::MAX; hot_len];
     let (mut starts, mut ends, mut keys) = (Vec::new(), Vec::new(), Vec::new());
-    // Reserve about one pair per 24 source bytes, matching the observed cold-hit density.
-    let mut pairs = Vec::with_capacity((end - start) / 24);
+    // A packed pair uses 17 term bits and 15 doc-offset bits; overflow switches to exact full-width storage.
+    let mut packed = Vec::with_capacity((end - start) / 24);
+    let mut full = (terms.len() >= (1 << 17)).then(|| Vec::with_capacity((end - start) / 24));
+    let mut doc_base = None;
     let (mut pos, mut rows) = (start, 0);
     while pos < end {
         let end_line = docs[pos..end].iter().position(|&b| b == b'\n').map_or(end, |x| pos + x);
         let line = &docs[pos..end_line];
         let (raw_id, tab) = document_id(line);
         let id = raw_id as u32;
+        let base = *doc_base.get_or_insert(id);
+        if full.is_none() && (id < base || id - base >= (1 << 15)) {
+            let old = std::mem::take(&mut packed);
+            full = Some(old.into_iter().map(|x| ((x >> 15), base + (x & 0x7fff))).collect());
+        }
         // SAFETY: dense document IDs are unique and each worker owns a disjoint newline-aligned range.
         unsafe {
             (line_ptr as *mut u32).add(id as usize).write(pos as u32);
@@ -656,7 +671,8 @@ fn scan_onepass(
                 } else if state[t].0 != id {
                     state[t].0 = id;
                     state[t].1 += 1;
-                    pairs.push((t as u32, id));
+                    if let Some(pairs) = &mut full { pairs.push((t as u32, id)); }
+                    else { packed.push(((t as u32) << 15) | (id - base)); }
                 }
             }
         }
@@ -664,10 +680,24 @@ fn scan_onepass(
         pos = end_line + 1;
     }
     let counts = state.into_iter().map(|x| x.1).collect();
-    WorkerScan { counts, pairs, rows }
+    let pairs = full.map_or(PairBuffer::Packed(packed), PairBuffer::Full);
+    WorkerScan { counts, pairs, doc_base: doc_base.unwrap_or(0), rows, elapsed_us: 0 }
 }
 #[rustfmt::skip]
-fn radix_sort_pairs(pairs: &mut Vec<(u32, u32)>) {
+fn radix_sort_pairs(pairs: &mut PairBuffer) {
+    let PairBuffer::Full(pairs) = pairs else {
+        let PairBuffer::Packed(pairs) = pairs else { unreachable!() };
+        let mut scratch = vec![0u32; pairs.len()];
+        for shift in [0, 16] {
+            let mut offsets = vec![0usize; 1 << 16];
+            for &pair in pairs.iter() { offsets[((pair >> (15 + shift)) & 0xffff) as usize] += 1; }
+            let mut next = 0;
+            for count in &mut offsets { let n = *count; *count = next; next += n; }
+            for &pair in pairs.iter() { let slot = &mut offsets[((pair >> (15 + shift)) & 0xffff) as usize]; scratch[*slot] = pair; *slot += 1; }
+            std::mem::swap(pairs, &mut scratch);
+        }
+        return;
+    };
     let mut scratch = vec![(0u32, 0u32); pairs.len()];
     for shift in [0, 16] {
         let mut offsets = vec![0usize; 1 << 16];
@@ -742,7 +772,8 @@ fn eval_query(
 #[rustfmt::skip]
 fn main() -> io::Result<()> {
     let timing = std::env::var_os("SD_TIMING").is_some(); let total = Instant::now(); let mut lap = total; let mut phases = [0u128; 7];
-    macro_rules! tick { ($i:expr) => { if timing { phases[$i] = lap.elapsed().as_micros(); lap = Instant::now(); } }; }
+    macro_rules! snap { ($p:expr) => { if timing { let (a,h,f)=proc_mem(); eprintln!("SD_MEM phase={} anon={} hwm={} file={}",$p,a,h,f); } }; }
+    macro_rules! tick { ($i:expr) => { if timing { phases[$i] = lap.elapsed().as_micros(); lap = Instant::now(); snap!($i); } }; }
     let args: Vec<String> = std::env::args().collect();
     let root = args.get(1).map_or("/data", String::as_str); let output = args.get(2).map_or("/out", String::as_str);
     let (_file, ptr, len) = map_file(Path::new(&format!("{root}/docs.txt")))?;
@@ -770,18 +801,20 @@ fn main() -> io::Result<()> {
     boundaries.push(len); let chunks: Vec<_> = boundaries.windows(2).map(|w| (w[0], w[1])).collect();
     let hot_tables = vec![HotTable::new(&terms, &hot_ids); chunks.len()];
     tick!(3); if timing { phases[2] = 0; }
+    let scan_faults_before = if timing { fault_snapshot() } else { (0, 0) };
     let mut scans: Vec<WorkerScan> = {
         // SAFETY: AtomicU64 has the same size and alignment as u64; this zeroed storage is only accessed atomically until workers join.
         let bitmaps = unsafe { std::slice::from_raw_parts(bitmap_words.as_ptr().cast::<AtomicU64>(), bitmap_words.len()) };
         let scans: Vec<_> = std::thread::scope(|scope| {
             let handles: Vec<_> = chunks.iter().enumerate().map(|(w, &(s, e))| {
                 let (ts, st, ht, th, bm) = (&terms, &table, &hot_tables[w], &term_hot, bitmaps);
-                scope.spawn(move || scan_onepass(docs, s, e, ts, st, ht, th, hot_len, words, bm, line_ptr))
+                scope.spawn(move || { let start=Instant::now(); let mut x=scan_onepass(docs,s,e,ts,st,ht,th,hot_len,words,bm,line_ptr); x.elapsed_us=start.elapsed().as_micros(); x })
             }).collect();
             handles.into_iter().map(|h| h.join().expect("one-pass worker panicked")).collect()
         });
         debug_assert_eq!(scans.iter().map(|x| x.rows).sum::<usize>(), n);
     line_starts[n] = len as u32;
+        snap!("pair_collection");
         for (t, term) in terms.iter_mut().enumerate() {
             term.df = if term.bitmap {
                 bitmaps[term.offset..term.offset + words].iter().map(|x| x.load(Ordering::Relaxed).count_ones() as usize).sum()
@@ -791,6 +824,7 @@ fn main() -> io::Result<()> {
     };
     // Sort workers one at a time so the temporary radix arrays do not multiply peak RSS by the worker count.
     for scan in &mut scans { radix_sort_pairs(&mut scan.pairs); }
+    snap!("radix_done");
     let mut starts = vec![0u32; terms.len()]; let mut total_posts = 0u32;
     for (t, term) in terms.iter().enumerate() { if !term.bitmap { starts[t] = total_posts; total_posts += term.df as u32; } }
     let terms_len = terms.len(); let mut off = vec![0u32; chunks.len() * terms_len];
@@ -800,22 +834,34 @@ fn main() -> io::Result<()> {
         debug_assert_eq!(next, starts[t] + term.df as u32);
     }
     let mut data = vec![0u32; total_posts as usize]; let post_ptr = data.as_mut_ptr() as usize;
+    snap!("scatter_start");
     std::thread::scope(|scope| {
         let handles: Vec<_> = scans.iter().enumerate().map(|(w, scan)| {
             let (pairs, offsets) = (&scan.pairs, &off);
             scope.spawn(move || {
                 let mut cursor = vec![0u32; terms_len];
-                for &(t, id) in pairs {
+                match pairs {
+                PairBuffer::Packed(pairs) => for &pair in pairs {
+                    let t = pair >> 15; let id = scan.doc_base + (pair & 0x7fff);
+                    let slot = offsets[w * terms_len + t as usize] + cursor[t as usize];
+                    // SAFETY: worker prefixes assign disjoint per-term slices; sorted pairs are unique.
+                    unsafe { (post_ptr as *mut u32).add(slot as usize).write(id); }
+                    cursor[t as usize] += 1;
+                },
+                PairBuffer::Full(pairs) => for &(t, id) in pairs {
                     let t = t as usize; let slot = offsets[w * terms_len + t] + cursor[t];
                     // SAFETY: worker prefixes assign disjoint per-term slices; sorted pairs are unique.
                     unsafe { (post_ptr as *mut u32).add(slot as usize).write(id); }
                     cursor[t] += 1;
-                }
+                }}
             })
         }).collect();
         for h in handles { h.join().expect("scatter worker panicked"); }
     });
-    drop(scans); tick!(4);
+    let scan_faults_after = if timing { fault_snapshot() } else { (0, 0) };
+    let scan_faults = (scan_faults_after.0-scan_faults_before.0, scan_faults_after.1-scan_faults_before.1);
+    let worker_times: Vec<u128> = scans.iter().map(|x|x.elapsed_us).collect();
+    snap!("pairs_pre_drop"); drop(scans); tick!(4);
     let postings = Postings { data, starts: starts.into_iter().map(|x| x as usize).collect() };
     let bits = &bitmap_words[..];
     let next = AtomicUsize::new(0); const BLOCK: usize = 64; let qlen = queries.len();
@@ -834,7 +880,7 @@ fn main() -> io::Result<()> {
         let mut blocks: Vec<_> = handles.into_iter().flat_map(|h| h.join().expect("query worker panicked")).collect();
         blocks.sort_unstable_by_key(|x| x.0); blocks.into_iter().flat_map(|x| x.1).collect::<Vec<u8>>()
     });
-    tick!(5); std::fs::create_dir_all(output)?; std::fs::write(Path::new(output).join("results.txt"), out)?;
-    if timing { phases[6] = lap.elapsed().as_micros(); let rss = std::fs::read_to_string("/proc/self/status").ok().and_then(|s| s.lines().find_map(|l| l.strip_prefix("RssAnon:")?.trim().split_whitespace().next()?.parse::<u64>().ok())).unwrap_or(0); eprintln!("SD_TIMING read={} query_parse={} parse={} table={} scan_a={} setup={} scan_b={} queries={} output={} total={} rss_anon_kb={}", query_read, query_parse, phases[0], phases[1], phases[2], phases[3], phases[4], phases[5], phases[6], total.elapsed().as_micros(), rss); }
+    tick!(5); snap!("query_complete"); std::fs::create_dir_all(output)?; std::fs::write(Path::new(output).join("results.txt"), out)?;
+    if timing { phases[6] = lap.elapsed().as_micros(); let rss=proc_mem(); eprintln!("SD_TIMING read={} query_parse={} parse={} table={} scan_a={} setup={} scan_b={} queries={} output={} total={} rss_anon_kb={} vmhwm_kb={} rss_file_kb={} scan_minor={} scan_major={} workers={:?}",query_read,query_parse,phases[0],phases[1],phases[2],phases[3],phases[4],phases[5],phases[6],total.elapsed().as_micros(),rss.0,rss.1,rss.2,scan_faults.0,scan_faults.1,worker_times); }
     std::process::exit(0)
 }
