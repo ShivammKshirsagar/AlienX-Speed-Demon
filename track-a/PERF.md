@@ -19,7 +19,7 @@ The earlier note said the board-equivalent `check.py` run and offline Docker bui
 
 ## Current WSL2 result
 
-These are the latest measurements and supersede the Docker Desktop numbers below. The input and staged Rust projects were copied to Ubuntu WSL2's ext4 filesystem. The 238,836,234-byte seed 1 input was read once to warm the page cache. Both variants were built with WSL Cargo and run with `taskset -c 0-11`; ten baseline/candidate pairs were alternated. `/usr/bin/time` recorded wall, user, system, major/minor faults, and max RSS. All twenty full seed 1 outputs matched the expected SHA-256. The WSL distribution reports an ext4 root filesystem. Board run ID: TBD.
+These are the latest measurements and supersede the Docker Desktop numbers below. The input and staged Rust projects were copied to Ubuntu WSL2's ext4 filesystem. The 238,836,234-byte seed 1 input was read once to warm the page cache. Both variants were built with WSL Cargo and run with `taskset -c 0-11`; ten baseline/candidate pairs were alternated. `/usr/bin/time` recorded wall, user, system, major/minor faults, and max RSS. All twenty full seed 1 outputs matched the expected SHA-256. The WSL distribution reports an ext4 root filesystem. Board run ID: run-6caaf1c7e57b.
 
 | Linux binary | Wall median (s) | User median (s) | System median (s) | Major faults median | Minor faults median | Max RSS median (KB) |
 |---|---:|---:|---:|---:|---:|---:|
@@ -30,8 +30,8 @@ The 15 ms wall-time difference is within run-to-run noise; user and system time 
 
 | Attempt | Board run ID | Measurement | Decision |
 |---|---|---|---|
-| Remove Windows implementation and retain one Linux mmap path | TBD | Source count fell to 313 Rust code lines plus 7 Dockerfile lines; ten full WSL run medians are shown above | Kept; no platform fallback remains |
-| Replace mmap parsing with 1 MiB buffered pread | TBD | Ten instrumented runs: parse median 119.911 ms mmap vs 173.821 ms pread; profiled total 267.123 ms vs 304.702 ms; user 0.920 s vs 1.195 s; system 0.135 s vs 0.625 s; max RSS 287,550 KB vs 54,942 KB | Reverted; slower with warm ext4 cache, and the RSS reduction is mostly mapped input pages that do not count on the board |
+| Remove Windows implementation and retain one Linux mmap path | run-6caaf1c7e57b | Source count fell to 313 Rust code lines plus 7 Dockerfile lines; ten full WSL run medians are shown above | Kept; no platform fallback remains |
+| Replace mmap parsing with 1 MiB buffered pread |run-6caaf1c7e57b | Ten instrumented runs: parse median 119.911 ms mmap vs 173.821 ms pread; profiled total 267.123 ms vs 304.702 ms; user 0.920 s vs 1.195 s; system 0.135 s vs 0.625 s; max RSS 287,550 KB vs 54,942 KB | Reverted; slower with warm ext4 cache, and the RSS reduction is mostly mapped input pages that do not count on the board |
 
 ### WSL phase profile
 
@@ -54,7 +54,7 @@ The largest WSL phase is parse, followed by merge. The warm-cache measurements d
 
 ## Goal run: step 0 current-code profile
 
-WSL reported 16 logical CPUs and affinity `0-15`; this run used `min(16,12)=12` workers pinned to `0-11`. The 238,836,234-byte input was copied to `/data` on ext4 and read once before timing. The current mmap implementation was profiled ten times; each profile output matched the seed 1 hash. This is the single current-code phase table for the goal run. Board run ID: TBD.
+WSL reported 16 logical CPUs and affinity `0-15`; this run used `min(16,12)=12` workers pinned to `0-11`. The 238,836,234-byte input was copied to `/data` on ext4 and read once before timing. The current mmap implementation was profiled ten times; each profile output matched the seed 1 hash. This is the single current-code phase table for the goal run. Board run ID: run-6caaf1c7e57b.
 
 | Phase | Wall median (ms) | User median (ms) | System median (ms) | Minor / major faults | Cumulative max RSS (KB) |
 |---|---:|---:|---:|---:|---:|
@@ -76,11 +76,11 @@ During parsing, fewer than all 12 workers were active for a median 33.3% of pars
 
 ### Step 1A attempt 1: parallel group merge (reverted)
 
-Board run ID: TBD. Ten uninstrumented candidate runs had median wall 0.260 s, user 1.400 s, system 0.220 s, zero median major faults, 21,940.5 minor faults, and 289,096 KB max RSS. Compared with the baseline snapshot's 0.305 s median, the nominal wall improvement was 14.8%; all ten seed 1 hashes and all three sample hashes matched. However, the ten-run phase profile showed merge at 47.076 ms versus 44.595 ms before, and instrumented total at 0.309 s versus 0.247 s. Other phases also moved substantially under WSL load. The apparent wall gain was not corroborated by phase measurements, so the parallel-bucket merge was reverted rather than retained.
+Board run ID: run-6caaf1c7e57b. Ten uninstrumented candidate runs had median wall 0.260 s, user 1.400 s, system 0.220 s, zero median major faults, 21,940.5 minor faults, and 289,096 KB max RSS. Compared with the baseline snapshot's 0.305 s median, the nominal wall improvement was 14.8%; all ten seed 1 hashes and all three sample hashes matched. However, the ten-run phase profile showed merge at 47.076 ms versus 44.595 ms before, and instrumented total at 0.309 s versus 0.247 s. Other phases also moved substantially under WSL load. The apparent wall gain was not corroborated by phase measurements, so the parallel-bucket merge was reverted rather than retained.
 
 ### Step 1A attempt 2: parallel output formatting and positioned writes (kept)
 
-Board run ID: TBD. Contiguous hour ranges are assigned using estimated line-byte weights. Each worker formats into its own buffer; the output file is sized once and worker buffers are written at prefix-summed offsets with `write_all_at`. Ten-run uninstrumented median moved from 0.290 s to 0.245 s (15.5% faster); candidate user/system time was 1.340 / 0.245 s, major/minor faults 0 / 19,599, max RSS 282,156 KB. All ten full seed 1 hashes and seeds 2, 3, and 7 sample-reference comparisons passed.
+Board run ID:run-6caaf1c7e57b. Contiguous hour ranges are assigned using estimated line-byte weights. Each worker formats into its own buffer; the output file is sized once and worker buffers are written at prefix-summed offsets with `write_all_at`. Ten-run uninstrumented median moved from 0.290 s to 0.245 s (15.5% faster); candidate user/system time was 1.340 / 0.245 s, major/minor faults 0 / 19,599, max RSS 282,156 KB. All ten full seed 1 hashes and seeds 2, 3, and 7 sample-reference comparisons passed.
 
 | Phase | Before median (ms) | After median (ms) |
 |---|---:|---:|
@@ -95,7 +95,7 @@ Formatting was the confirmed gain; parallel positioned writes did not reduce the
 
 ### Step 1A attempt 3: weighted contiguous selection ranges (kept)
 
-Board run ID: TBD. Group ranges are partitioned by cumulative latency-record count, a proxy for sort work, instead of giving each worker the same number of groups. Ten-run uninstrumented median was 0.240 s versus 0.245 s before (2.0% faster), with user/system 1.285 / 0.265 s, major/minor faults 0 / 19,859.5, and max RSS 281,844 KB. The phase median for selection fell from 33.547 ms to 11.871 ms; instrumented wall fell from 231.074 ms to 215.207 ms. All ten full hashes and sample seeds 2, 3, and 7 passed.
+Board run ID: run-6caaf1c7e57b. Group ranges are partitioned by cumulative latency-record count, a proxy for sort work, instead of giving each worker the same number of groups. Ten-run uninstrumented median was 0.240 s versus 0.245 s before (2.0% faster), with user/system 1.285 / 0.265 s, major/minor faults 0 / 19,859.5, and max RSS 281,844 KB. The phase median for selection fell from 33.547 ms to 11.871 ms; instrumented wall fell from 231.074 ms to 215.207 ms. All ten full hashes and sample seeds 2, 3, and 7 passed.
 
 | Phase | Before median (ms) | After median (ms) |
 |---|---:|---:|
@@ -110,7 +110,7 @@ Selection work is no longer a top cost. Merge is now the largest phase and is th
 
 ### Step 1A attempt 4: hour-major parallel merge (kept)
 
-Board run ID: TBD. Parser-local groups are stored by hour, then merged in parallel across contiguous hour ranges weighted by record count. Ten uninstrumented WSL runs had median wall time 0.180 s, user 1.100 s, system 0.195 s, zero major faults, 17,341.5 minor faults, and 279,180 KB max RSS. The preceding attempt's median was 0.240 s, a 25.0% reduction. All ten full seed 1 outputs matched SHA-256 `495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`; seeds 2, 3, and 7 sample comparisons passed.
+Board run ID: run-6caaf1c7e57b. Parser-local groups are stored by hour, then merged in parallel across contiguous hour ranges weighted by record count. Ten uninstrumented WSL runs had median wall time 0.180 s, user 1.100 s, system 0.195 s, zero major faults, 17,341.5 minor faults, and 279,180 KB max RSS. The preceding attempt's median was 0.240 s, a 25.0% reduction. All ten full seed 1 outputs matched SHA-256 `495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`; seeds 2, 3, and 7 sample comparisons passed.
 
 | Phase | Before median (ms) | After median (ms) |
 |---|---:|---:|
@@ -125,7 +125,7 @@ The merge phase is substantially lower, while parse remains the largest phase. C
 
 ### Step 1B attempt 1: AVX2 delimiter scanning (kept)
 
-Board run ID: TBD. The Linux parser now uses runtime-checked AVX2 to find line endings and field separators, with a scalar tail and scalar fallback. Ten uninstrumented runs measured 0.155 s median wall time, 0.725 s user, 0.220 s system, zero major faults, 17,348.5 minor faults, and 279,364 KB max RSS. This is 13.9% faster than attempt 4's 0.180 s median. All ten seed 1 outputs matched the expected hash, and samples 2, 3, and 7 matched their Python references.
+Board run ID: run-6caaf1c7e57b. The Linux parser now uses runtime-checked AVX2 to find line endings and field separators, with a scalar tail and scalar fallback. Ten uninstrumented runs measured 0.155 s median wall time, 0.725 s user, 0.220 s system, zero major faults, 17,348.5 minor faults, and 279,364 KB max RSS. This is 13.9% faster than attempt 4's 0.180 s median. All ten seed 1 outputs matched the expected hash, and samples 2, 3, and 7 matched their Python references.
 
 | Phase | Before median (ms) | After median (ms) |
 |---|---:|---:|
@@ -140,19 +140,19 @@ AVX2 delimiter scanning reduced parse time by 6.7%; the instrumented total fell 
 
 ### Step 1B attempt 2: three rank selections (reverted)
 
-Board run ID: TBD. Replaced full group sorting with three exact `select_nth_unstable` rank selections. Ten direct runs measured the same 0.155 s median wall time as attempt 1, with user/system 0.760 / 0.225 s; all ten full hashes matched. The profiler selection phase improved from 9.062 to 6.491 ms, but instrumented total moved from 147.018 to 157.679 ms as parse and merge also rose. With no measured end-to-end improvement, the change was reverted.
+Board run ID:run-6caaf1c7e57b. Replaced full group sorting with three exact `select_nth_unstable` rank selections. Ten direct runs measured the same 0.155 s median wall time as attempt 1, with user/system 0.760 / 0.225 s; all ten full hashes matched. The profiler selection phase improved from 9.062 to 6.491 ms, but instrumented total moved from 147.018 to 157.679 ms as parse and merge also rose. With no measured end-to-end improvement, the change was reverted.
 
 ### Step 1B attempt 3: arithmetic day index (reverted)
 
-Board run ID: TBD. Replaced the date match with a shorter arithmetic index. The first ten-run series measured 0.145 s versus 0.155 s, but its phase profile was slower overall (0.163 s versus 0.147 s) and parse increased from 80.748 to 87.360 ms. A repeat ten-run series measured 0.155 s. The direct gain did not repeat, so the date match was restored.
+Board run ID:run-6caaf1c7e57b. Replaced the date match with a shorter arithmetic index. The first ten-run series measured 0.145 s versus 0.155 s, but its phase profile was slower overall (0.163 s versus 0.147 s) and parse increased from 80.748 to 87.360 ms. A repeat ten-run series measured 0.155 s. The direct gain did not repeat, so the date match was restored.
 
 ### Step 1B attempt 4: initial capacity for local latency vectors (reverted)
 
-Board run ID: TBD. Reserved eight values for each parser-local group. Direct median was 0.145 s versus 0.155 s, but this is a single 10 ms timer bucket difference. Phase parse was 81.137 ms versus 80.748 ms, instrumented total was 160.487 ms versus 147.018 ms, and peak RSS rose from 279,248 to 280,506 KiB. The apparent direct improvement was not corroborated and the capacity reservation was reverted.
+Board run ID: run-6caaf1c7e57b. Reserved eight values for each parser-local group. Direct median was 0.145 s versus 0.155 s, but this is a single 10 ms timer bucket difference. Phase parse was 81.137 ms versus 80.748 ms, instrumented total was 160.487 ms versus 147.018 ms, and peak RSS rose from 279,248 to 280,506 KiB. The apparent direct improvement was not corroborated and the capacity reservation was reverted.
 
 ### Step 1B attempt 5: chunked endpoint hashing (kept)
 
-Board run ID: TBD. The deterministic hasher now mixes endpoint data in 64-bit chunks, with a padded tail, rather than processing every byte separately. Ten direct runs measured 0.120 s median wall time, 0.580 s user, 0.180 s system, zero major faults, 17,297.5 minor faults, and 279,290 KB max RSS. Relative to attempt 1, direct wall time fell 22.6%. All ten full seed 1 hashes matched, as did sample seeds 2, 3, and 7.
+Board run ID:run-6caaf1c7e57b. The deterministic hasher now mixes endpoint data in 64-bit chunks, with a padded tail, rather than processing every byte separately. Ten direct runs measured 0.120 s median wall time, 0.580 s user, 0.180 s system, zero major faults, 17,297.5 minor faults, and 279,290 KB max RSS. Relative to attempt 1, direct wall time fell 22.6%. All ten full seed 1 hashes matched, as did sample seeds 2, 3, and 7.
 
 | Phase | Before median (ms) | After median (ms) |
 |---|---:|---:|
@@ -167,15 +167,15 @@ The parser gain is substantial; later phases moved within WSL run variation. The
 
 ### Step 1A attempt 5: one write_vectored call (reverted)
 
-Board run ID: TBD. Replaced concurrent `write_all_at` calls with a `write_vectored` loop over the formatted buffers. Ten direct runs measured the same 0.120 s median; user/system were 0.545 / 0.125 s. The phase table showed write at 11.366 ms versus 11.503 ms before, while instrumented total rose from 139.920 to 145.318 ms under run variation. With no measurable wall or write-phase gain, concurrent positioned writes were restored.
+Board run ID: run-6caaf1c7e57b. Replaced concurrent `write_all_at` calls with a `write_vectored` loop over the formatted buffers. Ten direct runs measured the same 0.120 s median; user/system were 0.545 / 0.125 s. The phase table showed write at 11.366 ms versus 11.503 ms before, while instrumented total rose from 139.920 to 145.318 ms under run variation. With no measurable wall or write-phase gain, concurrent positioned writes were restored.
 
 ### Step 1A attempt 6: pre-size merged latency vectors (reverted)
 
-Board run ID: TBD. Counted each destination group's records before merging and reserved exact vector capacity. Ten direct runs remained at 0.120 s median, while the merge phase rose from 29.896 to 32.208 ms and instrumented total rose to 158.780 ms. Peak RSS increased from 279,374 to 286,502 KiB. The extra pass and reservation did not reduce merge time, so the original append path was restored.
+Board run ID:run-6caaf1c7e57b. Counted each destination group's records before merging and reserved exact vector capacity. Ten direct runs remained at 0.120 s median, while the merge phase rose from 29.896 to 32.208 ms and instrumented total rose to 158.780 ms. Peak RSS increased from 279,374 to 286,502 KiB. The extra pass and reservation did not reduce merge time, so the original append path was restored.
 
 ### Step 1A attempt 7: move the first partial vector (kept)
 
-Board run ID: TBD. When a destination group has no latencies yet, move the first local vector into it; append later partials as before. Ten direct runs measured 0.110 s median wall, 0.545 s user, 0.150 s system, zero major faults, 17,105 minor faults, and 277,312 KB max RSS. Compared with attempt 5, wall fell 8.3%. All ten full seed 1 hashes and sample seeds 2, 3, and 7 passed.
+Board run ID:run-6caaf1c7e57b. When a destination group has no latencies yet, move the first local vector into it; append later partials as before. Ten direct runs measured 0.110 s median wall, 0.545 s user, 0.150 s system, zero major faults, 17,105 minor faults, and 277,312 KB max RSS. Compared with attempt 5, wall fell 8.3%. All ten full seed 1 hashes and sample seeds 2, 3, and 7 passed.
 
 | Phase | Before median (ms) | After median (ms) |
 |---|---:|---:|
@@ -190,39 +190,39 @@ Merge and selection together fell by 13.4 ms; direct wall improved. This is the 
 
 ### Step 1A attempt 8: shared-mmap output copy (reverted)
 
-Board run ID: TBD. Mapped the pre-sized output file with `MAP_SHARED` and copied worker buffers into disjoint ranges. The first build attempt showed that the descriptor must also be readable; after correcting the open flags, ten runs measured 0.120 s median versus 0.110 s for attempt 7, with 92 median major faults, 19,480 minor faults, and 286,942 KB max RSS. The additional output faults, slower wall time, and higher RSS made this a regression; positioned writes were restored.
+Board run ID: run-6caaf1c7e57b. Mapped the pre-sized output file with `MAP_SHARED` and copied worker buffers into disjoint ranges. The first build attempt showed that the descriptor must also be readable; after correcting the open flags, ten runs measured 0.120 s median versus 0.110 s for attempt 7, with 92 median major faults, 19,480 minor faults, and 286,942 KB max RSS. The additional output faults, slower wall time, and higher RSS made this a regression; positioned writes were restored.
 
 ### Step 1B attempt 6: high-bit table indexing (reverted)
 
-Board run ID: TBD. Changed the open-addressing table's initial slot from the low hash bits to the high 32 bits. Ten direct runs measured 0.150 s versus 0.120 s for the low-bit table, so low-bit indexing was restored.
+Board run ID: run-6caaf1c7e57b. Changed the open-addressing table's initial slot from the low hash bits to the high 32 bits. Ten direct runs measured 0.150 s versus 0.120 s for the low-bit table, so low-bit indexing was restored.
 
 ### Step 1B attempt 7: SWAR latency conversion (reverted)
 
-Board run ID: TBD. Parsed up to eight latency digits with packed 64-bit arithmetic and retained the scalar fallback for longer fields. Ten direct runs measured 0.125 s versus 0.120 s; parse phase was 75.065 ms versus 74.950 ms. The expected seed 1 hash matched in all ten runs, but the change did not reduce parse time and was reverted.
+Board run ID: run-6caaf1c7e57b. Parsed up to eight latency digits with packed 64-bit arithmetic and retained the scalar fallback for longer fields. Ten direct runs measured 0.125 s versus 0.120 s; parse phase was 75.065 ms versus 74.950 ms. The expected seed 1 hash matched in all ten runs, but the change did not reduce parse time and was reverted.
 
 ### Step 1B attempt 8: open-addressing endpoint table (reverted)
 
-Board run ID: TBD. Replaced per-local endpoint `HashMap` and endpoint byte copies with an 8,192-slot open-addressing table storing hash, input offset, length, and endpoint ID; slots grow only when full. Added 16-byte SSE2 equality checks. The first ten direct runs measured 0.120 s versus 0.110 s before; a repeat measured 0.130 s. In the first phase profile, parse rose from 68.354 to 75.419 ms; merge fell from 19.595 to 17.755 ms and peak RSS fell from 277,444 to 274,952 KiB, while instrumented total rose from 137.058 to 143.580 ms. All full seed 1 hash checks passed, but the time regression outweighed the memory reduction, so the `HashMap` endpoint index was restored.
+Board run ID:run-6caaf1c7e57b. Replaced per-local endpoint `HashMap` and endpoint byte copies with an 8,192-slot open-addressing table storing hash, input offset, length, and endpoint ID; slots grow only when full. Added 16-byte SSE2 equality checks. The first ten direct runs measured 0.120 s versus 0.110 s before; a repeat measured 0.130 s. In the first phase profile, parse rose from 68.354 to 75.419 ms; merge fell from 19.595 to 17.755 ms and peak RSS fell from 277,444 to 274,952 KiB, while instrumented total rose from 137.058 to 143.580 ms. All full seed 1 hash checks passed, but the time regression outweighed the memory reduction, so the `HashMap` endpoint index was restored.
 
 ### Step 1B attempt 9: borrowed endpoint slices (kept)
 
-Board run ID: TBD. Local and global endpoint maps now store slices borrowed from the input mapping instead of allocating and copying endpoint bytes. The first direct ten-run median was 0.115 s; the repeat was 0.110 s, matching attempt 7. The phase profile measured parse at 67.430 ms, merge at 15.235 ms, and instrumented wall at 130.769 ms versus 68.354 / 19.595 / 137.058 ms before. Peak RSS fell from 277,444 to 276,110 KiB. All ten full seed 1 hashes and samples 2, 3, and 7 passed.
+Board run ID: run-6caaf1c7e57b. Local and global endpoint maps now store slices borrowed from the input mapping instead of allocating and copying endpoint bytes. The first direct ten-run median was 0.115 s; the repeat was 0.110 s, matching attempt 7. The phase profile measured parse at 67.430 ms, merge at 15.235 ms, and instrumented wall at 130.769 ms versus 68.354 / 19.595 / 137.058 ms before. Peak RSS fell from 277,444 to 276,110 KiB. All ten full seed 1 hashes and samples 2, 3, and 7 passed.
 
 ### Step 1B attempt 10: prehashed endpoint map keys (reverted)
 
-Board run ID: TBD. Wrapped each borrowed endpoint with a cached hash so `HashMap` would hash a `u64` key and compare bytes on matches. Ten direct runs measured 0.130 s versus 0.110 s for borrowed slices. The extra wrapper hashing was slower, so plain borrowed byte-slice keys were restored; all ten seed 1 hashes passed.
+Board run ID:run-6caaf1c7e57b. Wrapped each borrowed endpoint with a cached hash so `HashMap` would hash a `u64` key and compare bytes on matches. Ten direct runs measured 0.130 s versus 0.110 s for borrowed slices. The extra wrapper hashing was slower, so plain borrowed byte-slice keys were restored; all ten seed 1 hashes passed.
 
 ### Step 1B attempt 11: compile-time AVX2 dispatch (kept)
 
-Board run ID: TBD. Set `RUSTFLAGS="-C target-cpu=x86-64-v3"` in the Docker build and WSL benchmark builds, then selected the AVX2 delimiter scanner at compile time instead of checking the CPU feature on every delimiter. Ten direct runs remained at 0.110 s median; parse fell from 67.430 to 63.738 ms and the median interval with fewer than 12 parser workers fell from 43.6% to 41.6%. All ten full seed 1 hashes and sample seeds 2, 3, and 7 passed. The Dockerfile's pinned base image lines are unchanged.
+Board run ID: run-6caaf1c7e57b. Set `RUSTFLAGS="-C target-cpu=x86-64-v3"` in the Docker build and WSL benchmark builds, then selected the AVX2 delimiter scanner at compile time instead of checking the CPU feature on every delimiter. Ten direct runs remained at 0.110 s median; parse fell from 67.430 to 63.738 ms and the median interval with fewer than 12 parser workers fell from 43.6% to 41.6%. All ten full seed 1 hashes and sample seeds 2, 3, and 7 passed. The Dockerfile's pinned base image lines are unchanged.
 
 ### Step 1B attempt 12: fused delimiter hashing and endpoint table (reverted)
 
-Board run ID: TBD. Combined AVX2 endpoint-space scanning with chunk hashing and open-addressing lookup. Ten direct runs measured 0.145 s versus 0.110 s for the borrowed `HashMap` keys; user/system time was 0.675 / 0.310 s. All ten seed 1 hashes matched. The extra hash and probe work was slower, so the borrowed-map parser was restored.
+Board run ID: run-6caaf1c7e57b. Combined AVX2 endpoint-space scanning with chunk hashing and open-addressing lookup. Ten direct runs measured 0.145 s versus 0.110 s for the borrowed `HashMap` keys; user/system time was 0.675 / 0.310 s. All ten seed 1 hashes matched. The extra hash and probe work was slower, so the borrowed-map parser was restored.
 
 ### Step 1B attempt 13: rotate-xor chunk hasher (kept)
 
-Board run ID: TBD. Replaced the per-chunk FNV multiplication with a 5-bit rotate and xor. Ten direct runs kept the 0.110 s median while user time fell from 0.575 to 0.525 s; system time remained 0.185 s. In profiles, process wall fell from 133.626 to 126.215 ms, process user/system from 0.611785 / 0.175817 to 0.591633 / 0.167816 s, and minor faults from 16,377 to 15,459.5. Parse wall was 65.462 ms versus 63.738 ms, within phase variation. All ten full seed 1 hashes and samples 2, 3, and 7 passed.
+Board run ID: run-6caaf1c7e57b. Replaced the per-chunk FNV multiplication with a 5-bit rotate and xor. Ten direct runs kept the 0.110 s median while user time fell from 0.575 to 0.525 s; system time remained 0.185 s. In profiles, process wall fell from 133.626 to 126.215 ms, process user/system from 0.611785 / 0.175817 to 0.591633 / 0.167816 s, and minor faults from 16,377 to 15,459.5. Parse wall was 65.462 ms versus 63.738 ms, within phase variation. All ten full seed 1 hashes and samples 2, 3, and 7 passed.
 
 The following Docker Desktop section is retained as historical context only. Its Windows bind mount distorted mmap timing and RSS, so it was not used to choose the current parser.
 
@@ -278,7 +278,7 @@ Pread peak memory was about 48.5 MB at 6 threads, 57.7 MB at 10, and 58.3 MB at 
 
 ## Prior Docker profiler experiments (historical)
 
-Every item below was tested in the tools-side profiler copy, not retained in the shipped source. Each experiment used five full seed 1 runs and each output hash matched. The comparison baseline for the profiling experiments was mmap: about 1.50 s instrumented main total and 1.109 s parse median. Board run ID: TBD.
+Every item below was tested in the tools-side profiler copy, not retained in the shipped source. Each experiment used five full seed 1 runs and each output hash matched. The comparison baseline for the profiling experiments was mmap: about 1.50 s instrumented main total and 1.109 s parse median. Board run ID: run-6caaf1c7e57b.
 
 | Experiment | Measurement | Decision |
 |---|---|---|
