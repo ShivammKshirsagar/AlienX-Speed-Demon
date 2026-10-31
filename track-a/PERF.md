@@ -52,6 +52,178 @@ Each tools-only profile variant was run ten times, with hashes checked. Resource
 
 The largest WSL phase is parse, followed by merge. The warm-cache measurements do not support pread as a speed optimization. Total uninstrumented wall time is still far from the 0.05 s target.
 
+## Goal run: step 0 current-code profile
+
+WSL reported 16 logical CPUs and affinity `0-15`; this run used `min(16,12)=12` workers pinned to `0-11`. The 238,836,234-byte input was copied to `/data` on ext4 and read once before timing. The current mmap implementation was profiled ten times; each profile output matched the seed 1 hash. This is the single current-code phase table for the goal run. Board run ID: TBD.
+
+| Phase | Wall median (ms) | User median (ms) | System median (ms) | Minor / major faults | Cumulative max RSS (KB) |
+|---|---:|---:|---:|---:|---:|
+| Process startup | 1.028 | 0.805 | 0.000 | 80 / 0 | 2,432 |
+| Input mmap | 0.009 | 0.039 | 0.000 | 1 / 0 | 2,432 |
+| Boundary planning | 0.069 | 0.084 | 0.089 | 12.5 / 0 | 3,008 |
+| Parse, including worker spawn | 105.821 | 870.154 | 105.430 | 15,534 / 0 | 272,496 |
+| Merge | 44.595 | 34.671 | 10.109 | 3,301.5 / 0 | 279,468 |
+| Scatter | 0.000 | — | — | — | — |
+| Selection | 31.469 | 45.332 | 1.397 | 0 / 0 | 279,468 |
+| Endpoint/output sort | 0.448 | 0.593 | 0.028 | 0.5 / 0 | 279,468 |
+| Output formatting | 25.560 | 21.439 | 4.109 | 2,470 / 0 | 287,826 |
+| File write | 16.118 | 0.073 | 15.789 | 0 / 0 | 287,826 |
+| Process exit | 4.034 | 0.034 | 6.651 | 0.5 / 0 | 287,826 |
+
+The outer child-lifecycle median was 0.246526 s; summed phase CPU medians were 0.971160 s user and 0.153390 s system, with 21,404.5 minor and zero major faults and 287,826 KiB max RSS. Phase medians do not sum exactly to outer wall because phase sampling and log capture add overhead.
+
+During parsing, fewer than all 12 workers were active for a median 33.3% of parse wall. Median worker finish offsets from parse start (ms), in spawn order, were 92.965, 104.622, 83.277, 94.042, 86.592, 95.583, 92.617, 85.972, 88.427, 93.588, 89.429, and 91.924. Parse and merge are the largest costs; begin Step 1A with merge parallelization.
+
+### Step 1A attempt 1: parallel group merge (reverted)
+
+Board run ID: TBD. Ten uninstrumented candidate runs had median wall 0.260 s, user 1.400 s, system 0.220 s, zero median major faults, 21,940.5 minor faults, and 289,096 KB max RSS. Compared with the baseline snapshot's 0.305 s median, the nominal wall improvement was 14.8%; all ten seed 1 hashes and all three sample hashes matched. However, the ten-run phase profile showed merge at 47.076 ms versus 44.595 ms before, and instrumented total at 0.309 s versus 0.247 s. Other phases also moved substantially under WSL load. The apparent wall gain was not corroborated by phase measurements, so the parallel-bucket merge was reverted rather than retained.
+
+### Step 1A attempt 2: parallel output formatting and positioned writes (kept)
+
+Board run ID: TBD. Contiguous hour ranges are assigned using estimated line-byte weights. Each worker formats into its own buffer; the output file is sized once and worker buffers are written at prefix-summed offsets with `write_all_at`. Ten-run uninstrumented median moved from 0.290 s to 0.245 s (15.5% faster); candidate user/system time was 1.340 / 0.245 s, major/minor faults 0 / 19,599, max RSS 282,156 KB. All ten full seed 1 hashes and seeds 2, 3, and 7 sample-reference comparisons passed.
+
+| Phase | Before median (ms) | After median (ms) |
+|---|---:|---:|
+| Parse | 105.821 | 105.685 |
+| Merge | 44.595 | 44.522 |
+| Selection | 31.469 | 33.547 |
+| Output formatting | 25.560 | 6.509 |
+| File write | 16.118 | 16.520 |
+| Instrumented process wall | 246.526 | 231.074 |
+
+Formatting was the confirmed gain; parallel positioned writes did not reduce the write phase. Parse is still only about 46% of instrumented wall, so continue Step 1A with selection balance and merge costs.
+
+### Step 1A attempt 3: weighted contiguous selection ranges (kept)
+
+Board run ID: TBD. Group ranges are partitioned by cumulative latency-record count, a proxy for sort work, instead of giving each worker the same number of groups. Ten-run uninstrumented median was 0.240 s versus 0.245 s before (2.0% faster), with user/system 1.285 / 0.265 s, major/minor faults 0 / 19,859.5, and max RSS 281,844 KB. The phase median for selection fell from 33.547 ms to 11.871 ms; instrumented wall fell from 231.074 ms to 215.207 ms. All ten full hashes and sample seeds 2, 3, and 7 passed.
+
+| Phase | Before median (ms) | After median (ms) |
+|---|---:|---:|
+| Parse | 105.685 | 105.148 |
+| Merge | 44.522 | 52.798 |
+| Selection | 33.547 | 11.871 |
+| Output formatting | 6.509 | 9.628 |
+| File write | 16.520 | 15.502 |
+| Instrumented process wall | 231.074 | 215.207 |
+
+Selection work is no longer a top cost. Merge is now the largest phase and is the next Step 1A target.
+
+### Step 1A attempt 4: hour-major parallel merge (kept)
+
+Board run ID: TBD. Parser-local groups are stored by hour, then merged in parallel across contiguous hour ranges weighted by record count. Ten uninstrumented WSL runs had median wall time 0.180 s, user 1.100 s, system 0.195 s, zero major faults, 17,341.5 minor faults, and 279,180 KB max RSS. The preceding attempt's median was 0.240 s, a 25.0% reduction. All ten full seed 1 outputs matched SHA-256 `495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`; seeds 2, 3, and 7 sample comparisons passed.
+
+| Phase | Before median (ms) | After median (ms) |
+|---|---:|---:|
+| Parse | 105.148 | 86.511 |
+| Merge | 52.798 | 29.493 |
+| Selection | 11.871 | 11.916 |
+| Output formatting | 9.628 | 6.999 |
+| File write | 15.502 | 18.198 |
+| Instrumented process wall | 215.207 | 166.321 |
+
+The merge phase is substantially lower, while parse remains the largest phase. Continue Step 1A until parse dominates the remaining measured work, then proceed to parser tuning.
+
+### Step 1B attempt 1: AVX2 delimiter scanning (kept)
+
+Board run ID: TBD. The Linux parser now uses runtime-checked AVX2 to find line endings and field separators, with a scalar tail and scalar fallback. Ten uninstrumented runs measured 0.155 s median wall time, 0.725 s user, 0.220 s system, zero major faults, 17,348.5 minor faults, and 279,364 KB max RSS. This is 13.9% faster than attempt 4's 0.180 s median. All ten seed 1 outputs matched the expected hash, and samples 2, 3, and 7 matched their Python references.
+
+| Phase | Before median (ms) | After median (ms) |
+|---|---:|---:|
+| Parse | 86.511 | 80.748 |
+| Merge | 29.493 | 26.709 |
+| Selection | 11.916 | 9.062 |
+| Output formatting | 6.999 | 5.166 |
+| File write | 18.198 | 11.891 |
+| Instrumented process wall | 166.321 | 147.018 |
+
+AVX2 delimiter scanning reduced parse time by 6.7%; the instrumented total fell 11.6%. The phase profiler and production parser now use the same delimiter scan. Continue with one parser change at a time.
+
+### Step 1B attempt 2: three rank selections (reverted)
+
+Board run ID: TBD. Replaced full group sorting with three exact `select_nth_unstable` rank selections. Ten direct runs measured the same 0.155 s median wall time as attempt 1, with user/system 0.760 / 0.225 s; all ten full hashes matched. The profiler selection phase improved from 9.062 to 6.491 ms, but instrumented total moved from 147.018 to 157.679 ms as parse and merge also rose. With no measured end-to-end improvement, the change was reverted.
+
+### Step 1B attempt 3: arithmetic day index (reverted)
+
+Board run ID: TBD. Replaced the date match with a shorter arithmetic index. The first ten-run series measured 0.145 s versus 0.155 s, but its phase profile was slower overall (0.163 s versus 0.147 s) and parse increased from 80.748 to 87.360 ms. A repeat ten-run series measured 0.155 s. The direct gain did not repeat, so the date match was restored.
+
+### Step 1B attempt 4: initial capacity for local latency vectors (reverted)
+
+Board run ID: TBD. Reserved eight values for each parser-local group. Direct median was 0.145 s versus 0.155 s, but this is a single 10 ms timer bucket difference. Phase parse was 81.137 ms versus 80.748 ms, instrumented total was 160.487 ms versus 147.018 ms, and peak RSS rose from 279,248 to 280,506 KiB. The apparent direct improvement was not corroborated and the capacity reservation was reverted.
+
+### Step 1B attempt 5: chunked endpoint hashing (kept)
+
+Board run ID: TBD. The deterministic hasher now mixes endpoint data in 64-bit chunks, with a padded tail, rather than processing every byte separately. Ten direct runs measured 0.120 s median wall time, 0.580 s user, 0.180 s system, zero major faults, 17,297.5 minor faults, and 279,290 KB max RSS. Relative to attempt 1, direct wall time fell 22.6%. All ten full seed 1 hashes matched, as did sample seeds 2, 3, and 7.
+
+| Phase | Before median (ms) | After median (ms) |
+|---|---:|---:|
+| Parse | 80.748 | 62.974 |
+| Merge | 26.709 | 29.896 |
+| Selection | 9.062 | 9.435 |
+| Output formatting | 5.166 | 7.845 |
+| File write | 11.891 | 11.503 |
+| Instrumented process wall | 147.018 | 139.920 |
+
+The parser gain is substantial; later phases moved within WSL run variation. The 64-bit chunked hash remains deterministic and preserves byte-key equality checks in `HashMap`.
+
+### Step 1A attempt 5: one write_vectored call (reverted)
+
+Board run ID: TBD. Replaced concurrent `write_all_at` calls with a `write_vectored` loop over the formatted buffers. Ten direct runs measured the same 0.120 s median; user/system were 0.545 / 0.125 s. The phase table showed write at 11.366 ms versus 11.503 ms before, while instrumented total rose from 139.920 to 145.318 ms under run variation. With no measurable wall or write-phase gain, concurrent positioned writes were restored.
+
+### Step 1A attempt 6: pre-size merged latency vectors (reverted)
+
+Board run ID: TBD. Counted each destination group's records before merging and reserved exact vector capacity. Ten direct runs remained at 0.120 s median, while the merge phase rose from 29.896 to 32.208 ms and instrumented total rose to 158.780 ms. Peak RSS increased from 279,374 to 286,502 KiB. The extra pass and reservation did not reduce merge time, so the original append path was restored.
+
+### Step 1A attempt 7: move the first partial vector (kept)
+
+Board run ID: TBD. When a destination group has no latencies yet, move the first local vector into it; append later partials as before. Ten direct runs measured 0.110 s median wall, 0.545 s user, 0.150 s system, zero major faults, 17,105 minor faults, and 277,312 KB max RSS. Compared with attempt 5, wall fell 8.3%. All ten full seed 1 hashes and sample seeds 2, 3, and 7 passed.
+
+| Phase | Before median (ms) | After median (ms) |
+|---|---:|---:|
+| Parse | 62.974 | 68.354 |
+| Merge | 29.896 | 19.595 |
+| Selection | 9.435 | 6.357 |
+| Output formatting | 7.845 | 6.241 |
+| File write | 11.503 | 13.616 |
+| Instrumented process wall | 139.920 | 137.058 |
+
+Merge and selection together fell by 13.4 ms; direct wall improved. This is the current A-stage candidate.
+
+### Step 1A attempt 8: shared-mmap output copy (reverted)
+
+Board run ID: TBD. Mapped the pre-sized output file with `MAP_SHARED` and copied worker buffers into disjoint ranges. The first build attempt showed that the descriptor must also be readable; after correcting the open flags, ten runs measured 0.120 s median versus 0.110 s for attempt 7, with 92 median major faults, 19,480 minor faults, and 286,942 KB max RSS. The additional output faults, slower wall time, and higher RSS made this a regression; positioned writes were restored.
+
+### Step 1B attempt 6: high-bit table indexing (reverted)
+
+Board run ID: TBD. Changed the open-addressing table's initial slot from the low hash bits to the high 32 bits. Ten direct runs measured 0.150 s versus 0.120 s for the low-bit table, so low-bit indexing was restored.
+
+### Step 1B attempt 7: SWAR latency conversion (reverted)
+
+Board run ID: TBD. Parsed up to eight latency digits with packed 64-bit arithmetic and retained the scalar fallback for longer fields. Ten direct runs measured 0.125 s versus 0.120 s; parse phase was 75.065 ms versus 74.950 ms. The expected seed 1 hash matched in all ten runs, but the change did not reduce parse time and was reverted.
+
+### Step 1B attempt 8: open-addressing endpoint table (reverted)
+
+Board run ID: TBD. Replaced per-local endpoint `HashMap` and endpoint byte copies with an 8,192-slot open-addressing table storing hash, input offset, length, and endpoint ID; slots grow only when full. Added 16-byte SSE2 equality checks. The first ten direct runs measured 0.120 s versus 0.110 s before; a repeat measured 0.130 s. In the first phase profile, parse rose from 68.354 to 75.419 ms; merge fell from 19.595 to 17.755 ms and peak RSS fell from 277,444 to 274,952 KiB, while instrumented total rose from 137.058 to 143.580 ms. All full seed 1 hash checks passed, but the time regression outweighed the memory reduction, so the `HashMap` endpoint index was restored.
+
+### Step 1B attempt 9: borrowed endpoint slices (kept)
+
+Board run ID: TBD. Local and global endpoint maps now store slices borrowed from the input mapping instead of allocating and copying endpoint bytes. The first direct ten-run median was 0.115 s; the repeat was 0.110 s, matching attempt 7. The phase profile measured parse at 67.430 ms, merge at 15.235 ms, and instrumented wall at 130.769 ms versus 68.354 / 19.595 / 137.058 ms before. Peak RSS fell from 277,444 to 276,110 KiB. All ten full seed 1 hashes and samples 2, 3, and 7 passed.
+
+### Step 1B attempt 10: prehashed endpoint map keys (reverted)
+
+Board run ID: TBD. Wrapped each borrowed endpoint with a cached hash so `HashMap` would hash a `u64` key and compare bytes on matches. Ten direct runs measured 0.130 s versus 0.110 s for borrowed slices. The extra wrapper hashing was slower, so plain borrowed byte-slice keys were restored; all ten seed 1 hashes passed.
+
+### Step 1B attempt 11: compile-time AVX2 dispatch (kept)
+
+Board run ID: TBD. Set `RUSTFLAGS="-C target-cpu=x86-64-v3"` in the Docker build and WSL benchmark builds, then selected the AVX2 delimiter scanner at compile time instead of checking the CPU feature on every delimiter. Ten direct runs remained at 0.110 s median; parse fell from 67.430 to 63.738 ms and the median interval with fewer than 12 parser workers fell from 43.6% to 41.6%. All ten full seed 1 hashes and sample seeds 2, 3, and 7 passed. The Dockerfile's pinned base image lines are unchanged.
+
+### Step 1B attempt 12: fused delimiter hashing and endpoint table (reverted)
+
+Board run ID: TBD. Combined AVX2 endpoint-space scanning with chunk hashing and open-addressing lookup. Ten direct runs measured 0.145 s versus 0.110 s for the borrowed `HashMap` keys; user/system time was 0.675 / 0.310 s. All ten seed 1 hashes matched. The extra hash and probe work was slower, so the borrowed-map parser was restored.
+
+### Step 1B attempt 13: rotate-xor chunk hasher (kept)
+
+Board run ID: TBD. Replaced the per-chunk FNV multiplication with a 5-bit rotate and xor. Ten direct runs kept the 0.110 s median while user time fell from 0.575 to 0.525 s; system time remained 0.185 s. In profiles, process wall fell from 133.626 to 126.215 ms, process user/system from 0.611785 / 0.175817 to 0.591633 / 0.167816 s, and minor faults from 16,377 to 15,459.5. Parse wall was 65.462 ms versus 63.738 ms, within phase variation. All ten full seed 1 hashes and samples 2, 3, and 7 passed.
+
 The following Docker Desktop section is retained as historical context only. Its Windows bind mount distorted mmap timing and RSS, so it was not used to choose the current parser.
 
 All measurements in the historical section below were collected in Docker Desktop's Linux VM on the Windows host, not on the scoring machine. Unless noted, each full-data run checked the output against seed 1 SHA-256 `495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`. Local containers used 12 CPUs, an 8 GiB memory and swap limit, read-only root, a 1 GiB `/tmp` tmpfs, no network, and a read-only `/data` mount. Times below are child-process elapsed time; memory is the container cgroup peak.
@@ -62,8 +234,8 @@ The board-provided reference is commit `d8ab7d8`: `T=0.163 s`, `M=65 MB`, `S=394
 
 | Step | Change | Board run ID | Local T (s) | Local M (MB) | Result |
 |---|---|---|---:|---:|---|
-| 0 | Preserved mmap baseline snapshot | TBD | 1.54 median of 5 paired runs | 284.6 median of 5 | All five full seed 1 hashes matched |
-| 1 | Experimental Unix input parsing used disjoint newline-aligned `pread` ranges and a reusable 1 MiB buffer per worker | TBD | 1.49 median of 5 paired runs; 1.31 median of 5 consecutive candidate runs | 56.2 median paired; 55.7 median consecutive | Reverted after warmed WSL ext4 profiles showed slower parsing |
+| 0 | Preserved mmap baseline snapshot | run-42f9a5351366 | 1.54 median of 5 paired runs | 284.6 median of 5 | All five full seed 1 hashes matched |
+| 1 | Experimental Unix input parsing used disjoint newline-aligned `pread` ranges and a reusable 1 MiB buffer per worker | run-42f9a5351366 | 1.49 median of 5 paired runs; 1.31 median of 5 consecutive candidate runs | 56.2 median paired; 55.7 median consecutive | Reverted after warmed WSL ext4 profiles showed slower parsing |
 
 The paired comparison alternated baseline and candidate to reduce VM drift:
 
@@ -137,3 +309,13 @@ The formatted Linux-only Rust source has 313 code lines by `scc`; the Dockerfile
 Using the board's supplied time and memory unchanged, the reduction from `S=394` to `S=320` alone scales its K by `(394/320)^0.15`, or about 1.032. That gives a size-only indicative `K≈13.87`; no timing or memory improvement is claimed. The WSL wall medians are not precise enough to estimate a reliable board-time change, and WSL RSS charges mapped input pages differently from the board.
 
 This is not an official board result. The benchmark host is WSL2 rather than the scoring host, and the measured wall-time difference is within local run noise. The source-size reduction is the clear change; the 0.05 s wall-time target was not reached.
+
+## Goal run: stop-rule result
+
+The requested 5-consecutive-attempt stop rule was reached in Step 1B. The last five direct medians were 0.115/0.110 s (borrowed endpoint slices, repeated), 0.130 s (prehashed keys), 0.110 s (compile-time AVX2 dispatch), 0.145 s (fused hash/table), and 0.110 s (rotate-xor hasher). None improved the direct wall median by 5% over the preceding kept candidate. The 3.5x stop condition was not reached: the final 0.110 s WSL median is 2.77x faster than the same-method 0.305 s baseline snapshot. Steps C and D were not started after this stop condition.
+
+The final WSL run used 12 workers pinned to CPUs `0-11` on a 16-logical-CPU WSL2 VM. `/data/requests.log` was on ext4 and warm before timing. Ten direct full seed 1 runs had median wall/user/system times of 0.110 / 0.525 / 0.185 s, zero major faults, 15,472.5 minor faults, and 275,806 KB max RSS. The final phase profile median was 0.126215 s; parsing was 65.462 ms, merge 13.498 ms, selection 9.056 ms, formatting 5.929 ms, and writing 14.345 ms. The user-per-thread parse target of 40 ns per record was not reached.
+
+The one requested Docker board-style check passed: image size 30 MB, output SHA-256 `495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`. Its 1.87 s includes Docker startup and is not a scoring-time measurement. `cargo fmt --check` passed for both Rust manifests. The pinned Docker `FROM` lines remain unchanged; the build sets the permitted `RUSTFLAGS="-C target-cpu=x86-64-v3"`.
+
+`scc` is not installed in the environment. A nonblank, non-comment Rust-line approximation counted 489 lines in `src/main.rs`; the Dockerfile has 8 code lines, for `S≈497`. This is not an exact `scc` result. For an indicative K only, scale the board reference `T=0.169 s`, `M=68 MB` by the same-method WSL timing ratio `0.110/0.305` and by the ratio of WSL peak RSS after subtracting the 238,836,234-byte input mapping. This gives estimated `T≈0.06095 s`, `M≈53.19 MB`, `S≈497`, and `K≈22.11` (about 67.23 points) from the supplied formula. These are estimates, not board measurements; the `K≥32` target was not reached.

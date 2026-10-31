@@ -18,10 +18,17 @@ impl Hasher for FastHasher {
         } else {
             self.0
         };
-        for &b in bytes {
-            h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            h = h.rotate_left(5) ^ u64::from_ne_bytes(chunk.try_into().unwrap());
         }
-        self.0 = h;
+        let tail = chunks.remainder();
+        if !tail.is_empty() {
+            let mut last = [0; 8];
+            last[..tail.len()].copy_from_slice(tail);
+            h = h.rotate_left(5) ^ u64::from_ne_bytes(last);
+        }
+        self.0 = h ^ bytes.len() as u64;
     }
 
     fn finish(&self) -> u64 {
@@ -51,29 +58,28 @@ impl Group {
     }
 }
 
-struct Local {
-    endpoints: Vec<Vec<u8>>,
-    endpoint_ids: FastMap<Vec<u8>, usize>,
-    groups: FastMap<(u8, usize), Group>,
+struct Local<'a> {
+    endpoints: Vec<&'a [u8]>,
+    endpoint_ids: FastMap<&'a [u8], usize>,
+    groups: Vec<FastMap<usize, Group>>,
 }
 
-impl Local {
+impl<'a> Local<'a> {
     fn new() -> Self {
         Self {
             endpoints: Vec::new(),
             endpoint_ids: FastMap::default(),
-            groups: FastMap::default(),
+            groups: (0..HOURS).map(|_| FastMap::default()).collect(),
         }
     }
 
-    fn endpoint_id(&mut self, bytes: &[u8]) -> usize {
+    fn endpoint_id(&mut self, bytes: &'a [u8]) -> usize {
         if let Some(&id) = self.endpoint_ids.get(bytes) {
             return id;
         }
         let id = self.endpoints.len();
-        let owned = bytes.to_vec();
-        self.endpoint_ids.insert(owned.clone(), id);
-        self.endpoints.push(owned);
+        self.endpoint_ids.insert(bytes, id);
+        self.endpoints.push(bytes);
         id
     }
 }
@@ -122,27 +128,22 @@ unsafe fn find_byte_avx2(bytes: &[u8], needle: u8) -> Option<usize> {
 
 #[inline]
 fn find_byte(bytes: &[u8], needle: u8) -> Option<usize> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        // SAFETY: the runtime feature check proves AVX2 is available on this CPU.
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY: the allowed release target is explicitly compiled with AVX2 enabled.
         return unsafe { find_byte_avx2(bytes, needle) };
     }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     bytes.iter().position(|&byte| byte == needle)
 }
 
-fn parse_range(data: &[u8], mut pos: usize, end: usize) -> Local {
+fn parse_range<'a>(data: &'a [u8], mut pos: usize, end: usize) -> Local<'a> {
     let mut local = Local::new();
     parse_into(data, &mut pos, end, &mut local);
     local
 }
 
-fn parse_slice(data: &[u8], local: &mut Local) {
-    let mut pos = 0;
-    parse_into(data, &mut pos, data.len(), local);
-    assert_eq!(pos, data.len());
-}
-
-fn parse_into(data: &[u8], pos: &mut usize, end: usize, local: &mut Local) {
+fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local<'a>) {
     while *pos < end {
         let line_end = find_byte(&data[*pos..end], b'\n').map_or(end, |n| *pos + n);
         let line = &data[*pos..line_end];
@@ -156,9 +157,8 @@ fn parse_into(data: &[u8], pos: &mut usize, end: usize, local: &mut Local) {
         let endpoint = &line[endpoint_start..endpoint_end];
         let hour = hour_index(line);
         let endpoint_id = local.endpoint_id(endpoint);
-        let group = local
-            .groups
-            .entry((hour as u8, endpoint_id))
+        let group = local.groups[hour]
+            .entry(endpoint_id)
             .or_insert_with(Group::new);
         group.latencies.push(parse_uint(&line[latency_start..]));
         if line[status_start] == b'5' {
@@ -166,47 +166,6 @@ fn parse_into(data: &[u8], pos: &mut usize, end: usize, local: &mut Local) {
         }
         *pos = line_end + 1;
     }
-}
-
-#[cfg(unix)]
-fn parse_pread_range(path: &Path, start: usize, end: usize, chunk_size: usize) -> Local {
-    use std::os::unix::fs::FileExt;
-
-    let file = std::fs::File::open(path).expect("open pread input");
-    let mut local = Local::new();
-    let mut buffer = vec![0u8; chunk_size];
-    let mut buffered = 0usize;
-    let mut offset = start as u64;
-    while offset < end as u64 {
-        let capacity = buffer.len() - buffered;
-        let requested = capacity.min((end as u64 - offset) as usize);
-        let read = file
-            .read_at(&mut buffer[buffered..buffered + requested], offset)
-            .expect("pread input");
-        assert!(
-            read > 0 && read <= requested,
-            "short pread before assigned range end"
-        );
-        buffered += read;
-        offset += read as u64;
-
-        let complete = if offset == end as u64 {
-            buffered
-        } else {
-            buffer[..buffered]
-                .iter()
-                .rposition(|&b| b == b'\n')
-                .map_or(0, |index| index + 1)
-        };
-        if complete != 0 {
-            parse_slice(&buffer[..complete], &mut local);
-            buffer.copy_within(complete..buffered, 0);
-            buffered -= complete;
-        }
-        assert!(buffered < 256, "line exceeded the documented maximum size");
-    }
-    assert_eq!(buffered, 0, "assigned range ended mid-line");
-    local
 }
 
 #[cfg(unix)]
@@ -394,6 +353,43 @@ fn push_uint(out: &mut Vec<u8>, mut n: u64) {
     out.extend_from_slice(&digits[at..]);
 }
 
+fn format_hours(
+    range: std::ops::Range<usize>,
+    capacity: usize,
+    order: &[usize],
+    endpoints: &[&[u8]],
+    groups: &[Group],
+    hours: &[[u8; 20]],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(capacity);
+    for hour in range {
+        for &endpoint in order {
+            let group = &groups[hour * endpoints.len() + endpoint];
+            if group.latencies.is_empty() {
+                continue;
+            }
+            out.extend_from_slice(&hours[hour]);
+            out.push(b' ');
+            out.extend_from_slice(endpoints[endpoint]);
+            out.push(b' ');
+            let count = group.latencies.len() as u64;
+            push_uint(&mut out, count);
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.p50));
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.p95));
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.p99));
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.errors));
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.errors) * 1_000_000 / count);
+            out.push(b'\n');
+        }
+    }
+    out
+}
+
 fn page_faults() -> (u64, u64) {
     let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
     let fields: Vec<&str> = stat[stat.rfind(')').unwrap() + 2..]
@@ -402,7 +398,7 @@ fn page_faults() -> (u64, u64) {
     (fields[7].parse().unwrap(), fields[9].parse().unwrap())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Usage {
     user_us: u64,
     system_us: u64,
@@ -454,6 +450,23 @@ fn report_usage(phase: &str, start: Usage, end: Usage) {
     );
 }
 
+fn monotonic_ns() -> u64 {
+    #[repr(C)]
+    struct Timespec {
+        seconds: std::os::raw::c_long,
+        nanoseconds: std::os::raw::c_long,
+    }
+    unsafe extern "C" {
+        fn clock_gettime(clock: i32, time: *mut Timespec) -> i32;
+    }
+    let mut time = std::mem::MaybeUninit::<Timespec>::uninit();
+    // SAFETY: clock_gettime initializes the supplied timespec for CLOCK_MONOTONIC (1).
+    assert_eq!(unsafe { clock_gettime(1, time.as_mut_ptr()) }, 0);
+    // SAFETY: the successful clock_gettime call above initialized both timespec fields.
+    let time = unsafe { time.assume_init() };
+    time.seconds as u64 * 1_000_000_000 + time.nanoseconds as u64
+}
+
 fn rss_bytes(field: &str) -> u64 {
     std::fs::read_to_string("/proc/self/status")
         .unwrap()
@@ -497,6 +510,11 @@ fn apply_madvise(mapping: &Mapping) -> u128 {
 }
 
 fn main() {
+    let process_start_ns = monotonic_ns();
+    let launch_ns = std::env::var("PROFILE_LAUNCH_NS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(process_start_ns);
     let total_start = Instant::now();
     let usage_start = usage();
     let faults_start = page_faults();
@@ -542,25 +560,14 @@ fn main() {
 
     let parse_start = Instant::now();
     let parse_origin = parse_start;
-    let use_pread = std::env::var_os("PROFILE_PREAD").is_some();
-    let chunk_size = std::env::var("PROFILE_CHUNK_SIZE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(1 << 20)
-        .max(256);
-    let input_path = input.as_path();
-    let (locals, spawn_ns, worker_times) = thread::scope(|scope| {
+    let (mut locals, spawn_ns, worker_times) = thread::scope(|scope| {
         let mut joins = Vec::with_capacity(workers);
         let spawning = Instant::now();
         for pair in bounds.windows(2) {
             let (start, end) = (pair[0], pair[1]);
             joins.push(scope.spawn(move || {
                 let started = parse_origin.elapsed().as_nanos();
-                let local = if use_pread {
-                    parse_pread_range(input_path, start, end, chunk_size)
-                } else {
-                    parse_range(data, start, end)
-                };
+                let local = parse_range(data, start, end);
                 let finished = parse_origin.elapsed().as_nanos();
                 (local, started, finished)
             }));
@@ -586,38 +593,116 @@ fn main() {
     let memory_after_parse = rss_current();
 
     let merge_start = Instant::now();
-    let mut global_ids: FastMap<Vec<u8>, usize> = FastMap::default();
-    let mut endpoints: Vec<Vec<u8>> = Vec::new();
-    let mut groups: Vec<Group> = Vec::new();
-    for mut local in locals {
+    let mut global_ids: FastMap<&[u8], usize> = FastMap::default();
+    let mut endpoints: Vec<&[u8]> = Vec::new();
+    let mut remaps = Vec::with_capacity(locals.len());
+    for local in &mut locals {
         let mut remap = Vec::with_capacity(local.endpoints.len());
         for endpoint in local.endpoints.drain(..) {
-            let id = if let Some(&id) = global_ids.get(endpoint.as_slice()) {
+            let id = if let Some(&id) = global_ids.get(endpoint) {
                 id
             } else {
                 let id = endpoints.len();
-                global_ids.insert(endpoint.clone(), id);
+                global_ids.insert(endpoint, id);
                 endpoints.push(endpoint);
-                groups.resize_with(endpoints.len() * HOURS, Group::new);
                 id
             };
             remap.push(id);
         }
-        for ((hour, local_id), mut local_group) in local.groups.drain() {
-            let global = remap[local_id] * HOURS + usize::from(hour);
-            groups[global].latencies.append(&mut local_group.latencies);
-            groups[global].errors += local_group.errors;
+        remaps.push(remap);
+    }
+    let hour_weights: Vec<usize> = (0..HOURS)
+        .map(|hour| {
+            locals
+                .iter()
+                .map(|local| {
+                    local.groups[hour]
+                        .values()
+                        .map(|group| group.latencies.len())
+                        .sum::<usize>()
+                })
+                .sum()
+        })
+        .collect();
+    let target_hour_work = hour_weights.iter().sum::<usize>().div_ceil(workers).max(1);
+    let mut ranges = Vec::with_capacity(workers);
+    let (mut start_hour, mut hour_work) = (0, 0);
+    for (hour, &weight) in hour_weights.iter().enumerate() {
+        hour_work += weight;
+        if hour_work >= target_hour_work && ranges.len() + 1 < workers {
+            ranges.push(start_hour..hour + 1);
+            start_hour = hour + 1;
+            hour_work = 0;
         }
     }
+    if start_hour < HOURS || ranges.is_empty() {
+        ranges.push(start_hour..HOURS);
+    }
+    let mut range_jobs: Vec<Vec<(Vec<usize>, Vec<FastMap<usize, Group>>)>> = (0..ranges.len())
+        .map(|_| Vec::with_capacity(locals.len()))
+        .collect();
+    for (local, remap) in locals.into_iter().zip(remaps) {
+        let mut hour_maps = local.groups.into_iter();
+        for (range, jobs) in ranges.iter().zip(&mut range_jobs) {
+            let maps = hour_maps.by_ref().take(range.len()).collect();
+            jobs.push((remap.clone(), maps));
+        }
+    }
+    let endpoint_count = endpoints.len();
+    let mut groups: Vec<Group> = (0..endpoint_count * HOURS).map(|_| Group::new()).collect();
+    thread::scope(|scope| {
+        let mut remaining = groups.as_mut_slice();
+        for (range, sources) in ranges.into_iter().zip(range_jobs) {
+            let (destination, tail) = remaining.split_at_mut(range.len() * endpoint_count);
+            remaining = tail;
+            scope.spawn(move || {
+                for (remap, hour_maps) in sources {
+                    for (hour_offset, groups) in hour_maps.into_iter().enumerate() {
+                        for (local_endpoint, mut partial) in groups {
+                            let index = hour_offset * endpoint_count + remap[local_endpoint];
+                            if destination[index].latencies.is_empty() {
+                                destination[index].latencies =
+                                    std::mem::take(&mut partial.latencies);
+                            } else {
+                                destination[index].latencies.append(&mut partial.latencies);
+                            }
+                            destination[index].errors += partial.errors;
+                        }
+                    }
+                }
+            });
+        }
+    });
     let merge_ns = merge_start.elapsed().as_nanos();
     let usage_after_merge = usage();
     let memory_after_merge = rss_current();
 
     // Independent groups sort in parallel; sorting all values gives the three exact ranks.
     let selection_start = Instant::now();
-    let chunks = (groups.len() + workers - 1) / workers;
+    let target_work = groups
+        .iter()
+        .map(|group| group.latencies.len())
+        .sum::<usize>()
+        .div_ceil(workers)
+        .max(1);
+    let mut ranges = Vec::with_capacity(workers);
+    let (mut start, mut work) = (0, 0);
+    for (index, group) in groups.iter().enumerate() {
+        work += group.latencies.len();
+        if work >= target_work && ranges.len() + 1 < workers && index + 1 < groups.len() {
+            ranges.push(start..index + 1);
+            start = index + 1;
+            work = 0;
+        }
+    }
+    if start < groups.len() || ranges.is_empty() {
+        ranges.push(start..groups.len());
+    }
     thread::scope(|scope| {
-        for slice in groups.chunks_mut(chunks.max(1)) {
+        let mut remaining = groups.as_mut_slice();
+        for range in ranges {
+            let (slice, tail) = remaining.split_at_mut(range.len());
+            remaining = tail;
             scope.spawn(move || {
                 for group in slice.iter_mut().filter(|g| !g.latencies.is_empty()) {
                     group.latencies.sort_unstable();
@@ -635,38 +720,51 @@ fn main() {
 
     let endpoint_sort_start = Instant::now();
     let mut order: Vec<usize> = (0..endpoints.len()).collect();
-    order.sort_unstable_by(|&a, &b| endpoints[a].cmp(&endpoints[b]));
+    order.sort_unstable_by(|&a, &b| endpoints[a].cmp(endpoints[b]));
     let hours = hour_strings();
     let endpoint_sort_ns = endpoint_sort_start.elapsed().as_nanos();
     let usage_after_endpoint_sort = usage();
 
     let output_format_start = Instant::now();
-    let mut out = Vec::with_capacity(10_500_000);
+    let mut hour_sizes = [0usize; HOURS];
     for hour in 0..HOURS {
         for &endpoint in &order {
-            let group = &groups[endpoint * HOURS + hour];
-            if group.latencies.is_empty() {
-                continue;
+            let group = &groups[hour * endpoints.len() + endpoint];
+            if !group.latencies.is_empty() {
+                hour_sizes[hour] += endpoints[endpoint].len() + 48;
             }
-            out.extend_from_slice(&hours[hour]);
-            out.push(b' ');
-            out.extend_from_slice(&endpoints[endpoint]);
-            out.push(b' ');
-            let count = group.latencies.len() as u64;
-            push_uint(&mut out, count);
-            out.push(b' ');
-            push_uint(&mut out, u64::from(group.p50));
-            out.push(b' ');
-            push_uint(&mut out, u64::from(group.p95));
-            out.push(b' ');
-            push_uint(&mut out, u64::from(group.p99));
-            out.push(b' ');
-            push_uint(&mut out, u64::from(group.errors));
-            out.push(b' ');
-            push_uint(&mut out, u64::from(group.errors) * 1_000_000 / count);
-            out.push(b'\n');
         }
     }
+    let target_size = hour_sizes.iter().sum::<usize>().div_ceil(workers);
+    let mut ranges = Vec::with_capacity(workers);
+    let (mut start, mut size) = (0, 0);
+    for (hour, &weight) in hour_sizes.iter().enumerate() {
+        size += weight;
+        if size >= target_size && ranges.len() + 1 < workers {
+            ranges.push((start..hour + 1, size));
+            start = hour + 1;
+            size = 0;
+        }
+    }
+    if start < HOURS || ranges.is_empty() {
+        ranges.push((start..HOURS, size));
+    }
+    let output_buffers = thread::scope(|scope| {
+        let joins = ranges
+            .into_iter()
+            .map(|(range, capacity)| {
+                let order = &order;
+                let endpoints = &endpoints;
+                let groups = &groups;
+                let hours = &hours;
+                scope.spawn(move || format_hours(range, capacity, order, endpoints, groups, hours))
+            })
+            .collect::<Vec<_>>();
+        joins
+            .into_iter()
+            .map(|join| join.join().expect("format worker panicked"))
+            .collect::<Vec<_>>()
+    });
     let output_format_ns = output_format_start.elapsed().as_nanos();
     let usage_after_output = usage();
     let memory_after_output = rss_current();
@@ -674,7 +772,33 @@ fn main() {
         std::fs::create_dir_all(parent).expect("create output directory");
     }
     let write_start = Instant::now();
-    std::fs::write(output, out).expect("write summary");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(output)
+        .expect("open output");
+    let total_size = output_buffers.iter().map(Vec::len).sum::<usize>();
+    file.set_len(total_size as u64).expect("size output");
+    let mut offset = 0u64;
+    let offsets = output_buffers
+        .iter()
+        .map(|buffer| {
+            let start = offset;
+            offset += buffer.len() as u64;
+            start
+        })
+        .collect::<Vec<_>>();
+    use std::os::unix::fs::FileExt;
+    thread::scope(|scope| {
+        for (buffer, offset) in output_buffers.into_iter().zip(offsets) {
+            let file = &file;
+            scope.spawn(move || {
+                file.write_all_at(&buffer, offset)
+                    .expect("write output range");
+            });
+        }
+    });
     let write_ns = write_start.elapsed().as_nanos();
     let usage_after_write = usage();
     let memory_after_write = rss_current();
@@ -684,6 +808,7 @@ fn main() {
     eprintln!("profile faults_minor_major start={faults_start:?} after_map={faults_after_map:?} after_parse={faults_after_parse:?} end={faults_end:?}");
     eprintln!("profile rss_current_bytes after_map={memory_after_map} after_bounds={memory_after_bounds} after_parse={memory_after_parse} after_merge={memory_after_merge} after_selection={memory_after_selection} after_output={memory_after_output} after_write={memory_after_write}");
     eprintln!("profile rss_peak_bytes={}", rss_peak());
+    report_usage("process_start", Usage::default(), usage_start);
     report_usage("mmap", usage_start, usage_after_map);
     report_usage("boundary", usage_after_map, usage_after_bounds);
     report_usage("parse", usage_after_bounds, usage_after_parse);
@@ -701,5 +826,8 @@ fn main() {
     );
     report_usage("write", usage_after_output, usage_after_write);
     drop(mapping);
+    report_usage("process_exit", usage_after_write, usage());
+    let process_exit_marker_ns = monotonic_ns();
+    eprintln!("profile lifecycle main_start_ns={process_start_ns} launch_ns={launch_ns} exit_marker_ns={process_exit_marker_ns}");
     std::process::exit(0);
 }

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo='/mnt/c/GitHub Desktop/AlienX-Speed-Demon'
-binary="$HOME/track-a-bench/candidate/target/release/solution"
+binary="$HOME/track-a-bench/current-release/target/release/solution"
 mkdir -p /data/samples /out/references
 
 for seed in 2 3 7; do

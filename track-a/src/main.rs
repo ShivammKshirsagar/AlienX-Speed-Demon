@@ -17,10 +17,17 @@ impl Hasher for FastHasher {
         } else {
             self.0
         };
-        for &b in bytes {
-            h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            h = h.rotate_left(5) ^ u64::from_ne_bytes(chunk.try_into().unwrap());
         }
-        self.0 = h;
+        let tail = chunks.remainder();
+        if !tail.is_empty() {
+            let mut last = [0; 8];
+            last[..tail.len()].copy_from_slice(tail);
+            h = h.rotate_left(5) ^ u64::from_ne_bytes(last);
+        }
+        self.0 = h ^ bytes.len() as u64;
     }
 
     fn finish(&self) -> u64 {
@@ -50,29 +57,28 @@ impl Group {
     }
 }
 
-struct Local {
-    endpoints: Vec<Vec<u8>>,
-    endpoint_ids: FastMap<Vec<u8>, usize>,
-    groups: FastMap<(u8, usize), Group>,
+struct Local<'a> {
+    endpoints: Vec<&'a [u8]>,
+    endpoint_ids: FastMap<&'a [u8], usize>,
+    groups: Vec<FastMap<usize, Group>>,
 }
 
-impl Local {
+impl<'a> Local<'a> {
     fn new() -> Self {
         Self {
             endpoints: Vec::new(),
             endpoint_ids: FastMap::default(),
-            groups: FastMap::default(),
+            groups: (0..HOURS).map(|_| FastMap::default()).collect(),
         }
     }
 
-    fn endpoint_id(&mut self, bytes: &[u8]) -> usize {
+    fn endpoint_id(&mut self, bytes: &'a [u8]) -> usize {
         if let Some(&id) = self.endpoint_ids.get(bytes) {
             return id;
         }
         let id = self.endpoints.len();
-        let owned = bytes.to_vec();
-        self.endpoint_ids.insert(owned.clone(), id);
-        self.endpoints.push(owned);
+        self.endpoint_ids.insert(bytes, id);
+        self.endpoints.push(bytes);
         id
     }
 }
@@ -97,7 +103,40 @@ fn parse_uint(bytes: &[u8]) -> u32 {
         .fold(0u32, |n, &b| n * 10 + u32::from(b - b'0'))
 }
 
-fn parse_range(data: &[u8], start: usize, end: usize) -> Local {
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn find_byte_avx2(bytes: &[u8], needle: u8) -> Option<usize> {
+    use std::arch::x86_64::*;
+
+    let target = _mm256_set1_epi8(needle as i8);
+    let mut offset = 0;
+    while offset + 32 <= bytes.len() {
+        // SAFETY: the loop condition guarantees 32 readable bytes remain in the slice.
+        let chunk = unsafe { _mm256_loadu_si256(bytes.as_ptr().add(offset).cast()) };
+        let matches = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, target)) as u32;
+        if matches != 0 {
+            return Some(offset + matches.trailing_zeros() as usize);
+        }
+        offset += 32;
+    }
+    bytes[offset..]
+        .iter()
+        .position(|&byte| byte == needle)
+        .map(|index| offset + index)
+}
+
+#[inline]
+fn find_byte(bytes: &[u8], needle: u8) -> Option<usize> {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // SAFETY: the allowed release target is explicitly compiled with AVX2 enabled.
+        return unsafe { find_byte_avx2(bytes, needle) };
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+    bytes.iter().position(|&byte| byte == needle)
+}
+
+fn parse_range<'a>(data: &'a [u8], start: usize, end: usize) -> Local<'a> {
     let mut local = Local::new();
     let mut pos = start;
     parse_into(data, &mut pos, end, &mut local);
@@ -105,33 +144,22 @@ fn parse_range(data: &[u8], start: usize, end: usize) -> Local {
     local
 }
 
-fn parse_into(data: &[u8], pos: &mut usize, end: usize, local: &mut Local) {
+fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local<'a>) {
     while *pos < end {
-        let line_end = data[*pos..end]
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(end, |n| *pos + n);
+        let line_end = find_byte(&data[*pos..end], b'\n').map_or(end, |n| *pos + n);
         let line = &data[*pos..line_end];
 
         // The timestamp has fixed width; only the date and hour bytes are needed.
-        let mut field = 28;
-        while line[field] != b' ' {
-            field += 1;
-        }
+        let field = 28 + find_byte(&line[28..], b' ').unwrap();
         let endpoint_start = field + 1;
-        let endpoint_end = endpoint_start
-            + line[endpoint_start..]
-                .iter()
-                .position(|&b| b == b' ')
-                .unwrap();
+        let endpoint_end = endpoint_start + find_byte(&line[endpoint_start..], b' ').unwrap();
         let status_start = endpoint_end + 1;
         let latency_start = status_start + 4;
         let endpoint = &line[endpoint_start..endpoint_end];
         let hour = hour_index(line);
         let endpoint_id = local.endpoint_id(endpoint);
-        let group = local
-            .groups
-            .entry((hour as u8, endpoint_id))
+        let group = local.groups[hour]
+            .entry(endpoint_id)
             .or_insert_with(Group::new);
         group.latencies.push(parse_uint(&line[latency_start..]));
         if line[status_start] == b'5' {
@@ -232,6 +260,43 @@ fn push_uint(out: &mut Vec<u8>, mut n: u64) {
     out.extend_from_slice(&digits[at..]);
 }
 
+fn format_hours(
+    range: std::ops::Range<usize>,
+    capacity: usize,
+    order: &[usize],
+    endpoints: &[&[u8]],
+    groups: &[Group],
+    hours: &[[u8; 20]],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(capacity);
+    for hour in range {
+        for &endpoint in order {
+            let group = &groups[hour * endpoints.len() + endpoint];
+            if group.latencies.is_empty() {
+                continue;
+            }
+            out.extend_from_slice(&hours[hour]);
+            out.push(b' ');
+            out.extend_from_slice(endpoints[endpoint]);
+            out.push(b' ');
+            let count = group.latencies.len() as u64;
+            push_uint(&mut out, count);
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.p50));
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.p95));
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.p99));
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.errors));
+            out.push(b' ');
+            push_uint(&mut out, u64::from(group.errors) * 1_000_000 / count);
+            out.push(b'\n');
+        }
+    }
+    out
+}
+
 fn main() {
     let mut args = std::env::args_os().skip(1);
     let input: std::path::PathBuf = args
@@ -257,7 +322,7 @@ fn main() {
     }
     bounds.push(data.len());
 
-    let locals = thread::scope(|scope| {
+    let mut locals = thread::scope(|scope| {
         let mut joins = Vec::with_capacity(workers);
         for pair in bounds.windows(2) {
             let (start, end) = (pair[0], pair[1]);
@@ -269,34 +334,116 @@ fn main() {
             .collect::<Vec<_>>()
     });
 
-    let mut global_ids: FastMap<Vec<u8>, usize> = FastMap::default();
-    let mut endpoints: Vec<Vec<u8>> = Vec::new();
-    let mut groups: Vec<Group> = Vec::new();
-    for mut local in locals {
+    let mut global_ids: FastMap<&[u8], usize> = FastMap::default();
+    let mut endpoints: Vec<&[u8]> = Vec::new();
+    let mut remaps = Vec::with_capacity(locals.len());
+    for local in &mut locals {
         let mut remap = Vec::with_capacity(local.endpoints.len());
         for endpoint in local.endpoints.drain(..) {
-            let id = if let Some(&id) = global_ids.get(endpoint.as_slice()) {
+            let id = if let Some(&id) = global_ids.get(endpoint) {
                 id
             } else {
                 let id = endpoints.len();
-                global_ids.insert(endpoint.clone(), id);
+                global_ids.insert(endpoint, id);
                 endpoints.push(endpoint);
-                groups.resize_with(endpoints.len() * HOURS, Group::new);
                 id
             };
             remap.push(id);
         }
-        for ((hour, local_id), mut local_group) in local.groups.drain() {
-            let global = remap[local_id] * HOURS + usize::from(hour);
-            groups[global].latencies.append(&mut local_group.latencies);
-            groups[global].errors += local_group.errors;
+        remaps.push(remap);
+    }
+
+    let hour_weights: Vec<usize> = (0..HOURS)
+        .map(|hour| {
+            locals
+                .iter()
+                .map(|local| {
+                    local.groups[hour]
+                        .values()
+                        .map(|group| group.latencies.len())
+                        .sum::<usize>()
+                })
+                .sum()
+        })
+        .collect();
+    let target_hour_work = hour_weights.iter().sum::<usize>().div_ceil(workers).max(1);
+    let mut ranges = Vec::with_capacity(workers);
+    let (mut start_hour, mut hour_work) = (0, 0);
+    for (hour, &weight) in hour_weights.iter().enumerate() {
+        hour_work += weight;
+        if hour_work >= target_hour_work && ranges.len() + 1 < workers {
+            ranges.push(start_hour..hour + 1);
+            start_hour = hour + 1;
+            hour_work = 0;
+        }
+    }
+    if start_hour < HOURS || ranges.is_empty() {
+        ranges.push(start_hour..HOURS);
+    }
+
+    let mut range_jobs: Vec<Vec<(Vec<usize>, Vec<FastMap<usize, Group>>)>> = (0..ranges.len())
+        .map(|_| Vec::with_capacity(locals.len()))
+        .collect();
+    for (local, remap) in locals.into_iter().zip(remaps) {
+        let mut hour_maps = local.groups.into_iter();
+        for (range, jobs) in ranges.iter().zip(&mut range_jobs) {
+            let maps = hour_maps.by_ref().take(range.len()).collect();
+            jobs.push((remap.clone(), maps));
         }
     }
 
-    // Independent groups sort in parallel; sorting all values gives the three exact ranks.
-    let chunks = (groups.len() + workers - 1) / workers;
+    let endpoint_count = endpoints.len();
+    let mut groups: Vec<Group> = (0..endpoint_count * HOURS).map(|_| Group::new()).collect();
     thread::scope(|scope| {
-        for slice in groups.chunks_mut(chunks.max(1)) {
+        let mut remaining = groups.as_mut_slice();
+        for (range, sources) in ranges.into_iter().zip(range_jobs) {
+            let (destination, tail) = remaining.split_at_mut(range.len() * endpoint_count);
+            remaining = tail;
+            scope.spawn(move || {
+                for (remap, hour_maps) in sources {
+                    for (hour_offset, groups) in hour_maps.into_iter().enumerate() {
+                        for (local_endpoint, mut partial) in groups {
+                            let index = hour_offset * endpoint_count + remap[local_endpoint];
+                            if destination[index].latencies.is_empty() {
+                                destination[index].latencies =
+                                    std::mem::take(&mut partial.latencies);
+                            } else {
+                                destination[index].latencies.append(&mut partial.latencies);
+                            }
+                            destination[index].errors += partial.errors;
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    // Independent groups sort in parallel; sorting all values gives the three exact ranks.
+    let target_work = groups
+        .iter()
+        .map(|group| group.latencies.len())
+        .sum::<usize>()
+        .div_ceil(workers)
+        .max(1);
+    let mut ranges = Vec::with_capacity(workers);
+    let (mut start, mut work) = (0, 0);
+    for (index, group) in groups.iter().enumerate() {
+        work += group.latencies.len();
+        if work >= target_work && ranges.len() + 1 < workers && index + 1 < groups.len() {
+            ranges.push(start..index + 1);
+            start = index + 1;
+            work = 0;
+        }
+    }
+    if start < groups.len() || ranges.is_empty() {
+        ranges.push(start..groups.len());
+    }
+    // Contiguous ranges with similar record counts balance percentile-sort work.
+    thread::scope(|scope| {
+        let mut remaining = groups.as_mut_slice();
+        for range in ranges {
+            let (slice, tail) = remaining.split_at_mut(range.len());
+            remaining = tail;
             scope.spawn(move || {
                 for group in slice.iter_mut().filter(|g| !g.latencies.is_empty()) {
                     group.latencies.sort_unstable();
@@ -310,38 +457,77 @@ fn main() {
     });
 
     let mut order: Vec<usize> = (0..endpoints.len()).collect();
-    order.sort_unstable_by(|&a, &b| endpoints[a].cmp(&endpoints[b]));
+    order.sort_unstable_by(|&a, &b| endpoints[a].cmp(endpoints[b]));
     let hours = hour_strings();
-    let mut out = Vec::with_capacity(10_500_000);
+    let mut hour_sizes = [0usize; HOURS];
     for hour in 0..HOURS {
         for &endpoint in &order {
-            let group = &groups[endpoint * HOURS + hour];
-            if group.latencies.is_empty() {
-                continue;
+            let group = &groups[hour * endpoints.len() + endpoint];
+            if !group.latencies.is_empty() {
+                hour_sizes[hour] += endpoints[endpoint].len() + 48;
             }
-            out.extend_from_slice(&hours[hour]);
-            out.push(b' ');
-            out.extend_from_slice(&endpoints[endpoint]);
-            out.push(b' ');
-            let count = group.latencies.len() as u64;
-            push_uint(&mut out, count);
-            out.push(b' ');
-            push_uint(&mut out, u64::from(group.p50));
-            out.push(b' ');
-            push_uint(&mut out, u64::from(group.p95));
-            out.push(b' ');
-            push_uint(&mut out, u64::from(group.p99));
-            out.push(b' ');
-            push_uint(&mut out, u64::from(group.errors));
-            out.push(b' ');
-            push_uint(&mut out, u64::from(group.errors) * 1_000_000 / count);
-            out.push(b'\n');
         }
     }
+    let target_size = hour_sizes.iter().sum::<usize>().div_ceil(workers);
+    let mut ranges = Vec::with_capacity(workers);
+    let (mut start, mut size) = (0, 0);
+    for (hour, &weight) in hour_sizes.iter().enumerate() {
+        size += weight;
+        if size >= target_size && ranges.len() + 1 < workers {
+            ranges.push((start..hour + 1, size));
+            start = hour + 1;
+            size = 0;
+        }
+    }
+    if start < HOURS || ranges.is_empty() {
+        ranges.push((start..HOURS, size));
+    }
+    let output_buffers = thread::scope(|scope| {
+        let joins = ranges
+            .into_iter()
+            .map(|(range, capacity)| {
+                let order = &order;
+                let endpoints = &endpoints;
+                let groups = &groups;
+                let hours = &hours;
+                scope.spawn(move || format_hours(range, capacity, order, endpoints, groups, hours))
+            })
+            .collect::<Vec<_>>();
+        joins
+            .into_iter()
+            .map(|join| join.join().expect("format worker panicked"))
+            .collect::<Vec<_>>()
+    });
     if let Some(parent) = Path::new(&output).parent() {
         std::fs::create_dir_all(parent).expect("create output directory");
     }
-    std::fs::write(output, out).expect("write summary");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(output)
+        .expect("open output");
+    let total_size = output_buffers.iter().map(Vec::len).sum::<usize>();
+    file.set_len(total_size as u64).expect("size output");
+    let mut offset = 0u64;
+    let offsets = output_buffers
+        .iter()
+        .map(|buffer| {
+            let start = offset;
+            offset += buffer.len() as u64;
+            start
+        })
+        .collect::<Vec<_>>();
+    use std::os::unix::fs::FileExt;
+    thread::scope(|scope| {
+        for (buffer, offset) in output_buffers.into_iter().zip(offsets) {
+            let file = &file;
+            scope.spawn(move || {
+                file.write_all_at(&buffer, offset)
+                    .expect("write output range");
+            });
+        }
+    });
     drop(mapping);
     std::process::exit(0);
 }
