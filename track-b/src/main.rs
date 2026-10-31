@@ -3,7 +3,6 @@ use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 #[repr(C)]
 struct Term {
@@ -282,14 +281,31 @@ fn bitmap_op(a: Set, b: Set, op: u8, n: usize) -> Set {
         Set::Bits(out)
     }
 }
-fn term_set(t: usize, terms: &[Term], posts: &[u32], bits: &[u64], n: usize) -> Set {
+fn term_set(t: usize, terms: &[Term], posts: &[Vec<u32>], bits: &[u64], n: usize) -> Set {
     let x = &terms[t];
     if x.bitmap {
         let w = (n + 63) / 64;
         Set::Bits(bits[x.offset..x.offset + w].to_vec())
     } else {
-        Set::List(posts[x.offset..x.offset + x.df].to_vec())
+        Set::List(posts[t].clone())
     }
+}
+fn contains_doc(t: usize, doc: u32, terms: &[Term], posts: &[Vec<u32>], bits: &[u64], _n: usize) -> bool {
+    let term = &terms[t];
+    if term.bitmap {
+        bits[term.offset + doc as usize / 64] & (1u64 << (doc % 64)) != 0
+    } else {
+        posts[t].binary_search(&doc).is_ok()
+    }
+}
+fn phrase_token_id(ids: &[usize], terms: &[Term], raw: &[u8]) -> usize {
+    for &id in ids {
+        let token = &terms[id].bytes;
+        if token.len() == raw.len() && token.iter().zip(raw).all(|(&a, &b)| a == folded(b)) {
+            return id;
+        }
+    }
+    usize::MAX
 }
 fn output_set(s: Set, n: usize, out: &mut Vec<u8>) {
     let (count, sum, first) = match s {
@@ -376,14 +392,13 @@ fn fill_chunk(
     terms: &[Term],
     table: &[u32],
     counts: &[Vec<u32>],
-    sparse_offsets: &[usize],
+    offsets: &[usize],
     bitmaps: &[AtomicU64],
-    post_ptr: usize,
+    post_ptrs: &[usize],
     text_ptr: usize,
-    term_count: usize,
-) -> Vec<usize> {
-    let mut cursor = vec![0usize; term_count];
-    let mut last = vec![u32::MAX; term_count];
+) {
+    let mut cursor = vec![0usize; terms.len()];
+    let mut last = vec![u32::MAX; terms.len()];
     let mut pos = start;
     while pos < end {
         let mut line_end = pos;
@@ -393,7 +408,7 @@ fn fill_chunk(
         let line = &docs[pos..line_end];
         let (id, tab) = document_id(line);
         let id = id as u32;
-        // SAFETY: input lines have unique dense IDs, and each chunk owns a disjoint contiguous document range.
+        // SAFETY: dense document IDs are unique; each worker owns a disjoint newline-aligned chunk.
         unsafe {
             (text_ptr as *mut u32).add(id as usize).write((pos + tab + 1) as u32);
         }
@@ -410,14 +425,14 @@ fn fill_chunk(
                 if let Some(t) = lookup(terms, table, &line[s..p]) {
                     if last[t] != id {
                         last[t] = id;
-                        let term = &terms[t];
-                        if term.bitmap {
+                        if terms[t].bitmap {
+                            let term = &terms[t];
                             bitmaps[term.offset + id as usize / 64].fetch_or(1u64 << (id % 64), Ordering::Relaxed);
                         } else {
-                            let slot = sparse_offsets[chunk * term_count + t] + cursor[t];
-                            // SAFETY: pass A computed exact per-chunk term counts; these prefix intervals are disjoint between all worker threads.
+                            let slot = offsets[chunk * terms.len() + t] + cursor[t];
+                            // SAFETY: pass-A counts define non-overlapping per-chunk slices; each distinct term/document pair writes one slot.
                             unsafe {
-                                (post_ptr as *mut u32).add(slot).write(id);
+                                (post_ptrs[t] as *mut u32).add(slot).write(id);
                             }
                             cursor[t] += 1;
                         }
@@ -428,13 +443,11 @@ fn fill_chunk(
         pos = line_end + 1;
     }
     debug_assert!(counts[chunk].iter().enumerate().all(|(t, &n)| terms[t].bitmap || cursor[t] == n as usize));
-    cursor
 }
 fn eval_query(
     q: &Query,
     terms: &[Term],
-    table: &[u32],
-    posts: &[u32],
+    posts: &[Vec<u32>],
     bits: &[u64],
     docs: &[u8],
     text_starts: &[u32],
@@ -450,19 +463,29 @@ fn eval_query(
             output_set(r, n, &mut out);
         }
         Query::Phrase(ids) => {
-            let mut anchor = ids[0];
-            for &t in ids.iter().skip(1) {
-                if terms[t].df < terms[anchor].df {
-                    anchor = t;
+            let mut ordered = [0usize; 8];
+            ordered[..ids.len()].copy_from_slice(ids);
+            ordered[..ids.len()].sort_unstable_by_key(|&t| terms[t].df);
+            let mut order_len = 0;
+            for i in 0..ids.len() {
+                if i == 0 || ordered[i] != ordered[i - 1] {
+                    ordered[order_len] = ordered[i];
+                    order_len += 1;
                 }
             }
+            let anchor = ordered[0];
             let candidates = as_list(term_set(anchor, terms, posts, bits, n), n);
             let mut found = Vec::new();
             for d in candidates {
-                let mut tok = Vec::<usize>::new();
+                if ordered[1..order_len].iter().any(|&t| !contains_doc(t, d, terms, posts, bits, n)) {
+                    continue;
+                }
                 let start = text_starts[d as usize] as usize;
                 let end = if (d as usize) + 1 < n { text_starts[d as usize + 1] as usize - 1 } else { docs.len() - 1 };
                 let mut p = start;
+                let mut window = [usize::MAX; 8];
+                let mut token_count = 0usize;
+                let mut matched = false;
                 while p < end {
                     while p < end && !is_word(folded(docs[p])) {
                         p += 1;
@@ -472,10 +495,18 @@ fn eval_query(
                         p += 1;
                     }
                     if p > s {
-                        tok.push(lookup(terms, table, &docs[s..p]).unwrap_or(usize::MAX));
+                        window[token_count % 8] = phrase_token_id(ids, terms, &docs[s..p]);
+                        token_count += 1;
+                        if token_count >= ids.len() && window[(token_count - 1) % 8] == *ids.last().unwrap() {
+                            let first = token_count - ids.len();
+                            if (0..ids.len()).all(|j| window[(first + j) % 8] == ids[j]) {
+                                matched = true;
+                                break;
+                            }
+                        }
                     }
                 }
-                if tok.windows(ids.len()).any(|w| w == ids.as_slice()) {
+                if matched {
                     found.push(d);
                 }
             }
@@ -494,9 +525,7 @@ fn main() -> io::Result<()> {
     let root = if args.len() > 1 { args[1].as_str() } else { "/data" };
     let output_dir = args.get(2).map_or("/out", String::as_str);
     let qdata = std::fs::read(format!("{root}/queries.txt"))?;
-    let mut t0 = Instant::now();
     let (mut terms, queries) = parse_queries(&qdata);
-    eprintln!("parse_queries_ms={}", t0.elapsed().as_millis());
     let (_file, ptr, len) = map_file(Path::new(&format!("{root}/docs.txt")))?;
     let docs = unsafe { std::slice::from_raw_parts(ptr, len) }; // SAFETY: read-only slice covers the live mmap and never outlives the mapping.
     let mut slots = 1usize;
@@ -525,7 +554,6 @@ fn main() -> io::Result<()> {
     }
     boundaries.push(len);
     let chunks: Vec<(usize, usize)> = boundaries.windows(2).map(|w| (w[0], w[1])).collect();
-    t0 = Instant::now();
     let pass_a: Vec<(Vec<u32>, usize)> = std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for &(start, end) in &chunks {
@@ -538,37 +566,33 @@ fn main() -> io::Result<()> {
     let rows: Vec<usize> = pass_a.iter().map(|x| x.1).collect();
     let chunk_counts: Vec<Vec<u32>> = pass_a.into_iter().map(|x| x.0).collect();
     let n: usize = rows.iter().sum();
-    eprintln!("pass_a_ms={}", t0.elapsed().as_millis());
     for (ti, term) in terms.iter_mut().enumerate() {
         term.df = chunk_counts.iter().map(|c| c[ti] as usize).sum();
         term.bitmap = term.df >= n / 64.max(1);
     }
     let words = n.div_ceil(64);
     let mut bit_total = 0usize;
-    let mut post_total = 0usize;
     for term in &mut terms {
         if term.bitmap {
             term.offset = bit_total;
             bit_total += words;
         } else {
-            term.offset = post_total;
-            post_total += term.df;
+            term.offset = 0;
         }
     }
-    let mut sparse_offsets = vec![0usize; chunks.len() * terms.len()];
+    let mut offsets = vec![0usize; chunks.len() * terms.len()];
     for (ti, term) in terms.iter().enumerate().filter(|(_, t)| !t.bitmap) {
-        let mut offset = term.offset;
+        let mut offset = 0usize;
         for ci in 0..chunks.len() {
-            sparse_offsets[ci * terms.len() + ti] = offset;
+            offsets[ci * terms.len() + ti] = offset;
             offset += chunk_counts[ci][ti] as usize;
         }
-        debug_assert_eq!(offset, term.offset + term.df);
+        debug_assert_eq!(offset, term.df);
     }
     let bitmaps: Vec<AtomicU64> = (0..bit_total).map(|_| AtomicU64::new(0)).collect();
-    let mut posts = vec![0u32; post_total];
+    let mut posts: Vec<Vec<u32>> = terms.iter().map(|t| if t.bitmap { Vec::new() } else { vec![0; t.df] }).collect();
     let mut text_starts = vec![0u32; n];
-    t0 = Instant::now();
-    let post_ptr = posts.as_mut_ptr() as usize;
+    let post_ptrs: Vec<usize> = posts.iter_mut().map(|p| p.as_mut_ptr() as usize).collect();
     let text_ptr = text_starts.as_mut_ptr() as usize;
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
@@ -576,8 +600,9 @@ fn main() -> io::Result<()> {
             let terms_ref = &terms;
             let table_ref = &table;
             let counts_ref = &chunk_counts;
-            let offsets_ref = &sparse_offsets;
+            let offsets_ref = &offsets;
             let bitmaps_ref = &bitmaps;
+            let pointers_ref = &post_ptrs;
             handles.push(scope.spawn(move || {
                 fill_chunk(
                     docs,
@@ -589,9 +614,8 @@ fn main() -> io::Result<()> {
                     counts_ref,
                     offsets_ref,
                     bitmaps_ref,
-                    post_ptr,
+                    pointers_ref,
                     text_ptr,
-                    terms_ref.len(),
                 )
             }));
         }
@@ -600,8 +624,6 @@ fn main() -> io::Result<()> {
         }
     });
     let bits: Vec<u64> = bitmaps.iter().map(|x| x.load(Ordering::Relaxed)).collect();
-    eprintln!("pass_b_ms={}", t0.elapsed().as_millis());
-    t0 = Instant::now();
     let workers = std::thread::available_parallelism().map_or(1, usize::from).min(12).min(queries.len().max(1));
     let block = queries.len().div_ceil(workers);
     let mut out = Vec::with_capacity(queries.len() * 24);
@@ -609,31 +631,26 @@ fn main() -> io::Result<()> {
         let mut handles = Vec::new();
         for chunk in queries.chunks(block) {
             let terms_ref = &terms;
-            let table_ref = &table;
             let posts_ref = &posts;
             let bits_ref = &bits;
             let starts_ref = &text_starts;
             handles.push(scope.spawn(move || {
                 let mut part = Vec::new();
                 for q in chunk {
-                    part.extend_from_slice(&eval_query(
-                        q, terms_ref, table_ref, posts_ref, bits_ref, docs, starts_ref, n,
-                    ));
+                    part.extend_from_slice(&eval_query(q, terms_ref, posts_ref, bits_ref, docs, starts_ref, n));
                 }
                 part
             }));
         }
         for h in handles {
-            out.extend(h.join().expect("query worker panicked"));
+            let part = h.join().expect("query worker panicked");
+            out.extend(part);
         }
     });
-    eprintln!("query_phase_ms={}", t0.elapsed().as_millis());
-    let t0 = Instant::now();
     std::fs::create_dir_all(output_dir)?;
     std::fs::write(Path::new(output_dir).join("results.txt"), &out)?;
     let mut stdout = io::BufWriter::new(io::stdout().lock());
     stdout.write_all(&out)?;
     stdout.flush()?;
-    eprintln!("output_ms={}", t0.elapsed().as_millis());
     Ok(())
 }

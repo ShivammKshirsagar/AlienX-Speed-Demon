@@ -2,7 +2,7 @@
 set -euo pipefail
 repo='/mnt/c/GitHub Desktop/speed-demon-2026'
 solution='/mnt/c/GitHub Desktop/AlienX-Speed-Demon/track-b/target/release/solution'
-for seed in 2 3; do
+for seed in 2 3 4 5; do
   data="/data/track-b-seed-${seed}"
   reference="/data/track-b-reference-${seed}"
   python3 "$repo/generators/b_index.py" --seed "$seed" --scale sample --out "$data"
