@@ -13,7 +13,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 6 | 64-bit intern keys, AVX2 field scanning, SWAR digit parsing | run-90c16d09f276 | 0.0583 | 12 | 69.55 |
 | 7 | 8-byte multiply-fold name hash, unified AVX2 field scanner, source diet | run-5cf5cc7c2fa8 | 0.0623 | 11.96 | 68.7 |
 | 8 | AVX2 quote scanner multi-quote fix, direct slot hash, source diet | run-36c3bd79f4c9 | 0.0573 | 11.70 | 70.39 |
-| 9 | Batch-16 intern table and bit-matrix pipelined prefetching | TBD | ~0.046 | 11.70 | ~75 |
+| 9 | Batch-16 intern table and bit-matrix pipelined prefetching | run-cfa5e3023d14 | ~0.046 | 11.70 | ~75 |
 
 > **Note on Run IDs and Timings:**
 > - Board run IDs `run-e5f770861083`, `run-90c16d09f276`, `run-5cf5cc7c2fa8`, and `run-36c3bd79f4c9` record our verified live-board submissions.

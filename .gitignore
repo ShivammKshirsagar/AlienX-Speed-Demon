@@ -76,3 +76,6 @@ opt6-report.md
 /tools/*.patch
 /tools/*.txt
 /tools/*.json
+/tools/*.sh
+/tools/logs/
+final-report.md
