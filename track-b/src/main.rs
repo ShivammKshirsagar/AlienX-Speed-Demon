@@ -1,5 +1,14 @@
-﻿use std::borrow::Cow;
-use std::{fs::File, io, os::fd::AsRawFd, path::Path, sync::atomic::{AtomicU64, AtomicUsize, Ordering}, time::Instant};
+use std::borrow::Cow;
+use std::{
+    fs::File,
+    io,
+    os::fd::AsRawFd,
+    path::Path,
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+};
+
+#[allow(dead_code)]
+const DIAG_STAGE: u8 = 0;
 
 pub struct Term {
     pub bytes: Vec<u8>,
@@ -16,10 +25,21 @@ enum Set<'a> {
     List(Cow<'a, [u32]>),
     Bits(Cow<'a, [u64]>),
 }
-struct Postings { data: Vec<u32>, starts: Vec<usize> }
+struct Postings {
+    data: Vec<u32>,
+    starts: Vec<usize>,
+}
 
-fn folded(x: u8) -> u8 { if x.is_ascii_uppercase() { x + 32 } else { x } }
-fn is_word(x: u8) -> bool { x.is_ascii_lowercase() || x.is_ascii_digit() }
+fn folded(x: u8) -> u8 {
+    if x.is_ascii_uppercase() {
+        x + 32
+    } else {
+        x
+    }
+}
+fn is_word(x: u8) -> bool {
+    x.is_ascii_lowercase() || x.is_ascii_digit()
+}
 fn word_mask32(bytes: &[u8]) -> u32 {
     use std::arch::x86_64::*;
     // SAFETY: callers pass a slice with at least 32 readable bytes and the build enables AVX2.
@@ -97,7 +117,9 @@ fn folded_word(raw: &[u8], start: usize) -> u64 {
         unsafe { (tail.as_ptr().cast::<u64>().read_unaligned()).to_le() | 0x2020202020202020 }
     } else {
         let mut bytes = [0u8; 8];
-        for (dst, &src) in bytes.iter_mut().zip(tail) { *dst = folded(src); }
+        for (dst, &src) in bytes.iter_mut().zip(tail) {
+            *dst = folded(src);
+        }
         u64::from_le_bytes(bytes)
     }
 }
@@ -108,7 +130,10 @@ fn scan_key(raw: &[u8]) -> ScanKey {
         let key1 = if len >= 8 { folded_word(raw, len - 8) } else { 0 };
         let hash = (key0 ^ key1.rotate_left(17) ^ len as u64).wrapping_mul(0x9e3779b185ebca87);
         ScanKey { key0, key1, hash: hash ^ (hash >> 32) }
-    } else { let hash = hash_bytes(raw); ScanKey { key0: hash, key1: 0, hash } }
+    } else {
+        let hash = hash_bytes(raw);
+        ScanKey { key0: hash, key1: 0, hash }
+    }
 }
 pub struct ScanTable {
     slots: Vec<ScanSlot>,
@@ -117,13 +142,17 @@ pub struct ScanTable {
 impl ScanTable {
     pub fn new(terms: &[Term]) -> Self {
         let mut capacity = 1usize;
-        while capacity < terms.len().saturating_mul(3).div_ceil(2) { capacity *= 2; }
+        while capacity < terms.len().saturating_mul(3).div_ceil(2) {
+            capacity *= 2;
+        }
         let mut slots = vec![ScanSlot::default(); capacity];
         let mut tags = vec![0u32; capacity];
         for (id, term) in terms.iter().enumerate() {
             let key = scan_key(&term.bytes);
             let mut p = key.hash as usize & (capacity - 1);
-            while slots[p].id_plus_one != 0 { p = (p + 1) & (capacity - 1); }
+            while slots[p].id_plus_one != 0 {
+                p = (p + 1) & (capacity - 1);
+            }
             slots[p] = ScanSlot { key0: key.key0, key1: key.key1, id_plus_one: id + 1, len: term.bytes.len() };
             tags[p] = (key.hash >> 32) as u32 | 1;
         }
@@ -141,25 +170,35 @@ impl HotTable {
         for (i, &t) in ids.iter().enumerate() {
             let k = scan_key(&terms[t].bytes);
             let mut p = k.hash as usize & 2047;
-            while h.ids[p] != u16::MAX { p = (p + 1) & 2047; }
+            while h.ids[p] != u16::MAX {
+                p = (p + 1) & 2047;
+            }
             h.keys[p] = (k.key0, k.key1);
             h.ids[p] = i as u16;
         }
         h
     }
     fn lookup_key(&self, k: ScanKey, len: usize) -> Option<usize> {
-        if len > 16 { return None; }
+        if len > 16 {
+            return None;
+        }
         let mut p = k.hash as usize & 2047;
         loop {
             let id = self.ids[p];
-            if id == u16::MAX { return None; }
-            if self.keys[p] == (k.key0, k.key1) { return Some(id as usize); }
+            if id == u16::MAX {
+                return None;
+            }
+            if self.keys[p] == (k.key0, k.key1) {
+                return Some(id as usize);
+            }
             p = (p + 1) & 2047;
         }
     }
 }
 pub fn lookup(terms: &[Term], table: &ScanTable, raw: &[u8]) -> Option<usize> {
-    if raw.is_empty() { return None; }
+    if raw.is_empty() {
+        return None;
+    }
     lookup_key(terms, table, scan_key(raw), raw.len(), raw)
 }
 #[rustfmt::skip]
@@ -252,43 +291,50 @@ fn map_file(path: &Path) -> io::Result<(File, *mut u8, usize)> {
     let n = f.metadata()?.len() as usize;
     // SAFETY: mmap receives a valid open descriptor and file length; the mapping is read-only and kept alive with `f`.
     let p = unsafe { mmap(std::ptr::null_mut(), n, 1, 2, f.as_raw_fd(), 0) };
-    if p as isize == -1 { return Err(io::Error::last_os_error()); }
+    if p as isize == -1 {
+        return Err(io::Error::last_os_error());
+    }
     Ok((f, p.cast(), n))
 }
 fn advise_will_need(address: usize, len: usize) {
     use std::ffi::c_void;
     // SAFETY: the declaration matches the Linux madvise ABI; the mapped address is retained by main until this thread joins.
-    unsafe extern "C" { fn madvise(addr: *mut c_void, len: usize, advice: i32) -> i32; }
+    unsafe extern "C" {
+        fn madvise(addr: *mut c_void, len: usize, advice: i32) -> i32;
+    }
     // SAFETY: the address and length describe a live read-only mmap retained by main; MADV_WILLNEED does not modify it.
-    unsafe { let _ = madvise(address as *mut c_void, len, 3); }
+    unsafe {
+        let _ = madvise(address as *mut c_void, len, 3);
+    }
 }
-#[rustfmt::skip]
-fn proc_mem() -> (u64, u64, u64) { let s=std::fs::read_to_string("/proc/self/status").unwrap_or_default(); let get=|name:&str| s.lines().find_map(|l|l.strip_prefix(name)?.split_whitespace().next()?.parse().ok()).unwrap_or(0); (get("RssAnon:"),get("VmHWM:"),get("RssFile:")) }
-fn cgroup_mem() -> (String, String, String) {
-    let read = |name: &str| std::fs::read_to_string(format!("/sys/fs/cgroup/{name}")).unwrap_or_else(|_| "unavailable".into());
-    let peak = read("memory.peak").trim().to_owned();
-    let current = read("memory.current").trim().to_owned();
-    let stat = read("memory.stat");
-    let field = |name: &str| stat.split_whitespace().collect::<Vec<_>>().windows(2).find(|x| x[0] == name).map_or("unavailable", |x| x[1]);
-    (peak, current, format!("anon={} file={} kernel={} shmem={}", field("anon"), field("file"), field("kernel"), field("shmem")))
-}
-#[repr(C)] struct RUsage([i64; 18]);
-#[rustfmt::skip]
-fn fault_snapshot() -> (i64, i64) { unsafe extern "C" { fn getrusage(who:i32, usage:*mut RUsage)->i32; } let mut r=RUsage([0;18]); /* SAFETY: RUsage is the Linux x86-64 rusage field layout and the output is a valid writable struct. */ unsafe { let _=getrusage(0,&mut r); } (r.0[8],r.0[9]) }
 fn merge(a: &[u32], b: &[u32], op: u8) -> Vec<u32> {
     let mut out = Vec::with_capacity(if op == 1 { a.len() + b.len() } else { a.len().min(b.len()) });
     let (mut i, mut j) = (0, 0);
     while i < a.len() && j < b.len() {
         if a[i] == b[j] {
-            if op != 2 { out.push(a[i]); } i += 1; j += 1;
+            if op != 2 {
+                out.push(a[i]);
+            }
+            i += 1;
+            j += 1;
         } else if a[i] < b[j] {
-            if op != 0 { out.push(a[i]); } i += 1;
+            if op != 0 {
+                out.push(a[i]);
+            }
+            i += 1;
         } else {
-            if op == 1 { out.push(b[j]); } j += 1;
+            if op == 1 {
+                out.push(b[j]);
+            }
+            j += 1;
         }
     }
-    if op != 0 { out.extend_from_slice(&a[i..]); }
-    if op == 1 { out.extend_from_slice(&b[j..]); }
+    if op != 0 {
+        out.extend_from_slice(&a[i..]);
+    }
+    if op == 1 {
+        out.extend_from_slice(&b[j..]);
+    }
     out
 }
 fn as_list(s: Set<'_>, n: usize) -> Vec<u32> {
@@ -357,22 +403,30 @@ fn bitmap_op<'a>(a: Set<'a>, b: Set<'a>, op: u8, n: usize, scratch: &mut Vec<u64
     Set::Bits(Cow::Owned(out))
 }
 impl Postings {
-    fn list(&self, t: usize, terms: &[Term]) -> &[u32] { &self.data[self.starts[t]..self.starts[t] + terms[t].df] }
+    fn list(&self, t: usize, terms: &[Term]) -> &[u32] {
+        &self.data[self.starts[t]..self.starts[t] + terms[t].df]
+    }
 }
 fn term_set<'a>(t: usize, terms: &[Term], posts: &'a Postings, bits: &'a [u64], n: usize) -> Set<'a> {
     let x = &terms[t];
     if x.bitmap {
         let w = (n + 63) / 64;
         Set::Bits(Cow::Borrowed(&bits[x.offset..x.offset + w]))
-    } else { Set::List(Cow::Borrowed(posts.list(t, terms))) }
+    } else {
+        Set::List(Cow::Borrowed(posts.list(t, terms)))
+    }
 }
 fn contains_doc(t: usize, doc: u32, terms: &[Term], posts: &Postings, bits: &[u64]) -> bool {
     let term = &terms[t];
     if term.bitmap {
         bits[term.offset + doc as usize / 64] & (1u64 << (doc % 64)) != 0
-    } else { posts.list(t, terms).binary_search(&doc).is_ok() }
+    } else {
+        posts.list(t, terms).binary_search(&doc).is_ok()
+    }
 }
-fn same_token(raw: &[u8], term: &[u8]) -> bool { raw.len() == term.len() && raw.iter().zip(term).all(|(&a, &b)| folded(a) == folded(b)) }
+fn same_token(raw: &[u8], term: &[u8]) -> bool {
+    raw.len() == term.len() && raw.iter().zip(term).all(|(&a, &b)| folded(a) == folded(b))
+}
 #[rustfmt::skip]
 fn phrase_matches_at(data: &[u8], at: usize, anchor_pos: usize, ids: &[usize], terms: &[Term]) -> bool {
     let anchor = &terms[ids[anchor_pos]].bytes;
@@ -459,8 +513,16 @@ pub fn phrase_in_doc(data: &[u8], ids: &[usize], anchor: usize, terms: &[Term]) 
     false
 }
 fn push_decimal(out: &mut Vec<u8>, mut value: u64) {
-    let mut buf = [0u8; 20]; let mut p = buf.len();
-    loop { p -= 1; buf[p] = b'0' + (value % 10) as u8; value /= 10; if value == 0 { break; } }
+    let mut buf = [0u8; 20];
+    let mut p = buf.len();
+    loop {
+        p -= 1;
+        buf[p] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
+        }
+    }
     out.extend_from_slice(&buf[p..]);
 }
 #[rustfmt::skip]
@@ -498,12 +560,24 @@ fn output_set(s: Set<'_>, n: usize, out: &mut Vec<u8>) {
 fn document_id(line: &[u8]) -> (usize, usize) {
     let mut tab = 0;
     let mut id = 0usize;
-    while tab < line.len() && line[tab] != b'\t' { id = id * 10 + (line[tab] - b'0') as usize; tab += 1; }
+    while tab < line.len() && line[tab] != b'\t' {
+        id = id * 10 + (line[tab] - b'0') as usize;
+        tab += 1;
+    }
     (id, tab)
 }
-fn decimal_digits(mut id: usize) -> usize { let mut n = 1; while id >= 10 { id /= 10; n += 1; } n }
+fn decimal_digits(mut id: usize) -> usize {
+    let mut n = 1;
+    while id >= 10 {
+        id /= 10;
+        n += 1;
+    }
+    n
+}
 fn doc_count(docs: &[u8]) -> usize {
-    if docs.is_empty() { return 0; }
+    if docs.is_empty() {
+        return 0;
+    }
     let end = docs.len() - usize::from(docs.last() == Some(&b'\n'));
     let start = docs[..end].iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1);
     document_id(&docs[start..end]).0 + 1
@@ -532,6 +606,9 @@ fn sample_hot(docs: &[u8], terms: &[Term], table: &ScanTable) -> Vec<usize> {
             })
             .collect()
     };
+    // Sampled frequency selects only the storage format; full scan contents remain exact.
+    let sampled_docs: u32 = ranges.iter().map(|&(s, e)| docs[s..e].iter().filter(|&&b| b == b'\n').count() as u32).sum();
+    let bitmap_break_even = sampled_docs.div_ceil(32).max(2);
     let local_counts: Vec<Vec<u32>> = std::thread::scope(|scope| {
         let handles: Vec<_> = ranges.iter().map(|&(s, e)| scope.spawn(move || {
             let mut local_counts = vec![0u32; terms.len()];
@@ -556,7 +633,7 @@ fn sample_hot(docs: &[u8], terms: &[Term], table: &ScanTable) -> Vec<usize> {
         handles.into_iter().map(|h| h.join().expect("hot sample worker panicked")).collect()
     });
     for local in local_counts { for (total, count) in counts.iter_mut().zip(local) { *total += count; } }
-    let mut ids: Vec<_> = (0..terms.len()).filter(|&t| counts[t] >= 2 && terms[t].bytes.len() <= 16).collect();
+    let mut ids: Vec<_> = (0..terms.len()).filter(|&t| counts[t] >= bitmap_break_even && terms[t].bytes.len() <= 16).collect();
     ids.sort_unstable_by_key(|&t| (std::cmp::Reverse(counts[t]), t));
     ids.truncate(1024);
     ids
@@ -566,9 +643,11 @@ struct WorkerScan {
     pairs: PairBuffer,
     doc_base: u32,
     rows: usize,
-    elapsed_us: u128,
 }
-enum PairBuffer { Packed(Vec<u32>), Full(Vec<(u32, u32)>) }
+enum PairBuffer {
+    Packed(Vec<u32>),
+    Full(Vec<(u32, u32)>),
+}
 #[rustfmt::skip]
 fn scan_onepass(
     docs: &[u8],
@@ -642,7 +721,7 @@ fn scan_onepass(
     }
     let counts = state.into_iter().map(|x| x.1).collect();
     let pairs = full.map_or(PairBuffer::Packed(packed), PairBuffer::Full);
-    WorkerScan { counts, pairs, doc_base: doc_base.unwrap_or(0), rows, elapsed_us: 0 }
+    WorkerScan { counts, pairs, doc_base: doc_base.unwrap_or(0), rows }
 }
 #[rustfmt::skip]
 fn radix_sort_pairs(pairs: &mut PairBuffer) {
@@ -739,9 +818,6 @@ fn eval_query(
 }
 #[rustfmt::skip]
 fn main() -> io::Result<()> {
-    let timing = std::env::var_os("SD_TIMING").is_some(); let total = Instant::now(); let mut lap = total; let mut phases = [0u128; 7];
-    macro_rules! snap { ($p:expr) => { if timing { let (a,h,f)=proc_mem(); eprintln!("SD_MEM phase={} anon={} hwm={} file={}",$p,a,h,f); } }; }
-    macro_rules! tick { ($i:expr) => { if timing { phases[$i] = lap.elapsed().as_micros(); lap = Instant::now(); snap!($i); } }; }
     let args: Vec<String> = std::env::args().collect();
     let root = args.get(1).map_or("/data", String::as_str); let output = args.get(2).map_or("/out", String::as_str);
     let (_file, ptr, len) = map_file(Path::new(&format!("{root}/docs.txt")))?;
@@ -749,10 +825,10 @@ fn main() -> io::Result<()> {
     let docs = unsafe { std::slice::from_raw_parts(ptr, len) };
     let mapping = ptr as usize;
     let advise = std::thread::spawn(move || advise_will_need(mapping, len));
-    let read_start = Instant::now(); let qdata = std::fs::read(format!("{root}/queries.txt"))?; let query_read = read_start.elapsed().as_micros();
-    let parse_start = Instant::now(); let (mut terms, queries, query_ids, query_ops) = parse_queries(&qdata); let query_parse = parse_start.elapsed().as_micros();
+    let qdata = std::fs::read(format!("{root}/queries.txt"))?;
+    let (mut terms, queries, query_ids, query_ops) = parse_queries(&qdata);
     advise.join().expect("madvise worker panicked");
-    tick!(0); let table = ScanTable::new(&terms); let hot_ids = sample_hot(docs, &terms, &table); tick!(1);
+    let table = ScanTable::new(&terms); let hot_ids = sample_hot(docs, &terms, &table);
     let n = doc_count(docs);
     let mut term_hot = vec![u16::MAX; terms.len()];
     for (h, &t) in hot_ids.iter().enumerate() { term_hot[t] = h as u16; terms[t].bitmap = true; terms[t].offset = h * n.div_ceil(64); }
@@ -768,21 +844,18 @@ fn main() -> io::Result<()> {
     }
     boundaries.push(len); let chunks: Vec<_> = boundaries.windows(2).map(|w| (w[0], w[1])).collect();
     let hot_tables = vec![HotTable::new(&terms, &hot_ids); chunks.len()];
-    tick!(3); if timing { phases[2] = 0; }
-    let scan_faults_before = if timing { fault_snapshot() } else { (0, 0) };
     let mut scans: Vec<WorkerScan> = {
         // SAFETY: AtomicU64 has the same size and alignment as u64; this zeroed storage is only accessed atomically until workers join.
         let bitmaps = unsafe { std::slice::from_raw_parts(bitmap_words.as_ptr().cast::<AtomicU64>(), bitmap_words.len()) };
         let scans: Vec<_> = std::thread::scope(|scope| {
             let handles: Vec<_> = chunks.iter().enumerate().map(|(w, &(s, e))| {
                 let (ts, st, ht, th, bm) = (&terms, &table, &hot_tables[w], &term_hot, bitmaps);
-                scope.spawn(move || { let start=Instant::now(); let mut x=scan_onepass(docs,s,e,ts,st,ht,th,hot_len,words,bm,line_ptr); x.elapsed_us=start.elapsed().as_micros(); x })
+                scope.spawn(move || scan_onepass(docs,s,e,ts,st,ht,th,hot_len,words,bm,line_ptr))
             }).collect();
             handles.into_iter().map(|h| h.join().expect("one-pass worker panicked")).collect()
         });
         debug_assert_eq!(scans.iter().map(|x| x.rows).sum::<usize>(), n);
     line_starts[n] = len as u32;
-        snap!("pair_collection");
         for (t, term) in terms.iter_mut().enumerate() {
             term.df = if term.bitmap {
                 bitmaps[term.offset..term.offset + words].iter().map(|x| x.load(Ordering::Relaxed).count_ones() as usize).sum()
@@ -792,7 +865,6 @@ fn main() -> io::Result<()> {
     };
     // Sort workers one at a time so the temporary radix arrays do not multiply peak RSS by the worker count.
     for scan in &mut scans { radix_sort_pairs(&mut scan.pairs); }
-    snap!("radix_done");
     let mut starts = vec![0u32; terms.len()]; let mut total_posts = 0u32;
     for (t, term) in terms.iter().enumerate() { if !term.bitmap { starts[t] = total_posts; total_posts += term.df as u32; } }
     let terms_len = terms.len(); let mut off = vec![0u32; chunks.len() * terms_len];
@@ -802,7 +874,6 @@ fn main() -> io::Result<()> {
         debug_assert_eq!(next, starts[t] + term.df as u32);
     }
     let mut data = vec![0u32; total_posts as usize]; let post_ptr = data.as_mut_ptr() as usize;
-    snap!("scatter_start");
     std::thread::scope(|scope| {
         let handles: Vec<_> = scans.iter().enumerate().map(|(w, scan)| {
             let (pairs, offsets) = (&scan.pairs, &off);
@@ -826,10 +897,7 @@ fn main() -> io::Result<()> {
         }).collect();
         for h in handles { h.join().expect("scatter worker panicked"); }
     });
-    let scan_faults_after = if timing { fault_snapshot() } else { (0, 0) };
-    let scan_faults = (scan_faults_after.0-scan_faults_before.0, scan_faults_after.1-scan_faults_before.1);
-    let worker_times: Vec<u128> = scans.iter().map(|x|x.elapsed_us).collect();
-    snap!("pairs_pre_drop"); drop(scans); tick!(4);
+    drop(scans);
     let postings = Postings { data, starts: starts.into_iter().map(|x| x as usize).collect() };
     let bits = &bitmap_words[..];
     let next = AtomicUsize::new(0); const BLOCK: usize = 64; let qlen = queries.len();
@@ -848,7 +916,6 @@ fn main() -> io::Result<()> {
         let mut blocks: Vec<_> = handles.into_iter().flat_map(|h| h.join().expect("query worker panicked")).collect();
         blocks.sort_unstable_by_key(|x| x.0); blocks.into_iter().flat_map(|x| x.1).collect::<Vec<u8>>()
     });
-    tick!(5); snap!("query_complete"); std::fs::create_dir_all(output)?; std::fs::write(Path::new(output).join("results.txt"), out)?;
-    if timing { phases[6] = lap.elapsed().as_micros(); let rss=proc_mem(); eprintln!("SD_TIMING read={} query_parse={} parse={} table={} scan_a={} setup={} scan_b={} queries={} output={} total={} rss_anon_kb={} vmhwm_kb={} rss_file_kb={} scan_minor={} scan_major={} workers={:?}",query_read,query_parse,phases[0],phases[1],phases[2],phases[3],phases[4],phases[5],phases[6],total.elapsed().as_micros(),rss.0,rss.1,rss.2,scan_faults.0,scan_faults.1,worker_times); let (peak,current,stat)=cgroup_mem(); eprintln!("SD_CGROUP memory_peak={} memory_current={} {}",peak,current,stat); }
+    std::fs::create_dir_all(output)?; std::fs::write(Path::new(output).join("results.txt"), out)?;
     std::process::exit(0)
 }

@@ -16,6 +16,11 @@ target/
 /tools/track-a/bench-reference/
 /tools/track-a/bench-summary.txt
 
+# Local Track A experiment workspaces and superseded step copies.
+# The current submission is in /track-a; experiment results stay in the logs.
+/tools/track-a/work/
+/tools/track-a/steps/
+
 # Generated Track D verification and benchmark files.
 /tools/track-d/data/
 /tools/track-d/out/
