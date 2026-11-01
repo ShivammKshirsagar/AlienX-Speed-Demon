@@ -34,3 +34,11 @@ This is the B2 version currently copied to `track-a/`. It includes `_exit(0)` an
 | Parse / merge-scatter / selection / format / write / main-to-exit | Not captured for this exact snapshot |
 
 Using the supplied board conversion `T_board = 0.55 × WSL min`, the local RSS proxy converted from KiB to MiB, and the supplied formula, its estimated K is about 25.7 (about 70.5 points). This remains a local estimate; board T/M/S determine the real score.
+
+## 2026-11-01 ruler results
+
+The final ruler ran 30 interleaved rounds each of baseline, n1, n2, and n3, checking the expected seed-1 hash on every run. The three candidates also passed the full fixture/reference suite, but all failed the estimated-K gate. They are retained here as reviewable experiment snapshots only; do not copy them over `track-a/` or push them. `track-a/src` remains the baseline snapshot2 (S 497).
+
+- **n1:** one-pass packed records, local endpoint tables, parallel prefix/scatter; S 970; median cgroup `memory.peak` 292.32 MB; all requested checks passed; CPU min/median 1.435/1.759 s, wall 1.045/1.312 s, relative K 0.970; rejected (min CPU gain 13.9%, K lower); push steps: none, keep snapshot2; commit suggestion: **No commit**.
+- **n2:** n1 plus previous-endpoint cache; S 970; median cgroup `memory.peak` 293.03 MB; all requested checks passed; CPU min/median 1.467/1.704 s, wall 1.116/1.252 s, relative K 0.959; rejected (min CPU gain 11.94%, below 12% gate, K lower); push steps: none, keep snapshot2; commit suggestion: **No commit**.
+- **n3:** two-pass count/fill with replayed chunk ownership; S 967; median cgroup `memory.peak` 277.01 MB; all requested checks passed; CPU min/median 1.724/2.048 s, wall 1.099/1.301 s, relative K 0.895; rejected (min CPU 3.5% slower, K lower); push steps: none, keep snapshot2; commit suggestion: **No commit**.

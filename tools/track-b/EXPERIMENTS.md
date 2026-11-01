@@ -47,3 +47,50 @@
 | Release each pair buffer after its scatter | 13.41 → 13.34 | Reverted | Three-run scoreboard: min total 936.890 ms and peak RssAnon 131,116 KB; K fell 0.5%, short of the keep threshold; fixture and seed-1 hash passed |
 | Query-class CPU profile | 13.41 → 13.41 | Diagnostic | One full run: BOOL list 127.9 ms, BOOL bitmap 679.2 ms, PHRASE 1,003.7 ms summed thread CPU; phrase work dominates, full hash passed |
 | Slice ASCII case-insensitive phrase compare | 13.41 → 12.96 | Reverted | Three-run scoreboard: min total 971.063 ms, peak RssAnon 139,024 KB; full hash and fixture/sample checks passed, K fell |
+
+## Memory design note
+1. Baseline ruler: Docker `memory.peak` is 146,067,456 B; board M is 161 MB; avoidable contributors include pair storage, hot bitmaps, and query-only overlap.
+2. (a) For 25M cold memberships, 128-doc bit-packed delta blocks at 1.3-1.5 B/member imply 32.5-37.5 MB payload plus a directory; hot bitmaps add roughly 32 MB unless their break-even is enforced.
+3. With directory and 5-10 MB of live tables, (a) estimates 70-80 MB peak and removes the largest cold-posting allocation.
+4. At 20% slower time, M=75 MB and S=1,200 imply relative K about 1.015; at no time loss, relative K is about 1.111.
+5. (b) Four u16 doc-id partitions need 2 B/member, or about 50 MB for 25M memberships, plus per-term partition offsets.
+6. Eliminating global bitmaps gives an estimated 60-75 MB peak for (b); four sorted runs add merge work, likely less query CPU than block decoding but more than u32 lists.
+7. At a 5% time increase, M=70 MB and S=1,100 imply relative K about 1.114; smaller memory savings can fail the 5 MB gate.
+8. (c) Freeing scan-only lookup tables and query input after scatter should be nearly time-neutral, but lowers peak only if the measured peak is in query evaluation.
+9. A 5 MB reduction at unchanged time and S changes K by only about 0.7% near 146 MB; it cannot alone meet the 60 MB target.
+10. First measure phase-boundary RssAnon and Docker peak, then test (c) because it is smallest and exact; if peak is scan-bound, pursue (b) before block decoding.
+
+| Scatter pair-buffer ownership | Full-scale ext4-backed Docker, min-of-5 total 822.198 ms vs baseline 970.155 ms; memory.peak max 146,595,840 B vs baseline 146,563,072 B. Timing passed, memory failed the required -5 MB gate; reverted/not shipped. Peak remained at scan/scatter. |
+| Bitmap list/bitset break-even from sampled df | Full-scale ext4-backed Docker, min-of-5 total 835.818 ms; memory.peak max 146,792,448 B. Timing passed, memory worsened and missed the -5 MB gate; reverted/not shipped. Output hash matched seed 1. Peak remained at `pairs_pre_drop` (RssAnon 138,780-139,080 KB); query peak was lower (93,232-93,848 KB), so scan-only state was not freed in query. |
+
+## Follow-up interleaved round
+1. The five-run baseline/pair/bitmap session used the same warm ext4 Docker volume, CPU set and flags; baseline T min/median = 951.967/990.752 ms and M median/max = 146,227,200/146,837,504 B.
+2. Pair ownership T min/median = 911.846/963.464 ms and M median/max = 146,022,400/146,530,304 B; S 998→1,000 gives estimated K ×1.0217, below the 3% keep threshold.
+3. Bitmap break-even T min/median = 878.401/942.884 ms and M median/max = 146,321,408/147,185,664 B; S 998→1,000 gives estimated K ×1.0406, so it clears the updated 3% score gate despite no memory reduction.
+4. Both saved variants build offline and pass the worked example, phrase-boundary fixture and seed-1 full hash; B sample seeds 2–5 are absent from the workspace and Docker volumes, so those reference checks remain unrun.
+5. Radix sorting already runs one worker at a time (`for scan in &mut scans { radix_sort_pairs(..) }`); baseline measured memory.peak median/max 146,227,200/146,837,504 B, so 12 simultaneous radix temporaries are not present to remove.
+6. Four-partition u16 lists use the 250,000-doc corpus's four 65,536-ID ranges, but candidate T min/median = 979.931/995.193 ms and M median/max = 149,491,712/149,626,880 B against its interleaved baseline 920.725/1,276.493 ms and 146,255,872/146,595,840 B; S 998→1,038 yields K ×0.9755, so reverted.
+
+## Block-compressed postings design note (before implementation)
+1. Encode each cold posting list in 128-document blocks; a block stores its base doc, count, width, and packed local deltas (0–127), with a per-term block directory for skip-to-block lookup.
+2. Count then fill exact block payloads in two corpus passes; each worker owns its temporary block counters and writes a disjoint term/block range, so no global pair buffer or scatter overlap is retained.
+3. Dense terms stay exact bitmaps; the sampled threshold selects representation only, and full scans determine every output bit or posting.
+4. At 25M cold memberships, fixed 7-bit deltas are about 21.9 MB; allow 8–16 MB for block headers/directories and alignment.
+5. Retain the existing query table, docs mapping, hot bitmaps, and worker state at roughly 35–50 MB; expected steady peak is 65–90 MB if count/fill buffers stay under 5 MB.
+6. Two full token scans and block packing add an estimated 35–70% to scan CPU; block decode in BOOL/PHRASE may add 10–30% query CPU, giving total T roughly 1.3–1.7× baseline until measured.
+7. Using M=80 MB and T=1.5× predicts K ×0.92 before line-count change; it is a memory probe, not a presumed score win, and will be kept only if measured K wins.
+8. The main risk is directory overhead for sparse terms; if it exceeds 16 MB, store only non-empty blocks with delta-coded block IDs and preserve binary-search skips.
+9. Keep list/bitmap BOOL evaluation left-to-right; decode one block per side into fixed scratch arrays and never expand whole postings lists for a merge.
+10. Reject if peak remains above 100 MB without a ≥3% estimated-K gain; report actual peak location and time even if reverted.
+
+## Interleaved follow-up decisions
+- The latest scoring instruction changes the keep gate from the earlier absolute 5 MB memory-drop gate to estimated K ≥3% using same-session min T and median `memory.peak`; the earlier pair/bitmap “reverted” rows record the then-active gate, while the decision below uses the updated gate.
+- Pair ownership: exact candidate source is saved in `candidates/pair-ownership/`; same-session T min/median 911.846/963.464 ms, M median/max 146,022,400/146,530,304 B, S=1,000; relative K ×1.0217, so rejected.
+- Bitmap break-even: exact candidate source is saved in `candidates/bitmap-threshold/`; same-session T min/median 878.401/942.884 ms, M median/max 146,321,408/147,185,664 B, S=1,000; relative K ×1.0406, so selected. Full seed-1 and both fixtures pass. Local cgroup max is 147,185,664 B; the no-timing final-source check measured memory.peak 146,309,120 B (anon 225,280; file 1,511,424; kernel 585,728; shmem 0 B after exit).
+- The selected bitmap candidate's sampled df chooses only the representation. Its observed RssAnon peak is in the scan/pair-scatter phase; query-complete RssAnon is about 93 MB, below scan. No scan-state free was needed for this selected version.
+- Radix temp-buffer change: no change was needed. The baseline already sorts one worker buffer at a time, and the interleaved baseline M median/max was 146,227,200/146,837,504 B; there are not 12 simultaneous radix temporaries.
+- Four-run u16 lists: full hash passed, but interleaved baseline T min/median 920.725/1,276.493 ms and M median/max 146,255,872/146,595,840 B versus candidate 979.931/995.193 ms and 149,491,712/149,626,880 B; S=1,038, relative K ×0.9755, reverted.
+- 128-doc packed blocks: 7,823,302 block records and 91,177,666 encoded bytes; full hash/fixtures passed, but a diagnostic run reached 176,721,920 B `memory.peak` and 1,245.011 ms, reverted.
+- 1,024-doc packed blocks: 4,449,060 records and 66,897,565 bytes; after removing per-block allocations and freeing scan-only state before query, one diagnostic run was 1,217.181 ms and 141,996,032 B `memory.peak`, reverted.
+- 8,192-doc packed blocks: 1,647,520 records and 37,632,458 bytes; interleaved baseline T min/median 986.838/1,053.900 ms, M median 146,272,256 B; candidate T min/median 1,132.241/1,202.277 ms, M median/max 108,462,080/108,986,368 B, S=1,141, estimated K ×0.9427, reverted. Full hash/fixtures passed; scan/pair conversion set the peak, and query RssAnon fell from about 99.9 MB to 94.9 MB after releasing ScanTable, hot tables, hot ids, chunk metadata, and query text.
+- Track B sample/reference inputs for seeds 2–5 are absent (`data/s2` and `data/s3` contain Track A `requests.log`; no B `docs.txt`/`queries.txt` or reference outputs exist in the workspace or Docker volumes). Those checks remain outstanding; no run IDs or PERF rows were fabricated because nothing was pushed.
