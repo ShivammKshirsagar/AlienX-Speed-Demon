@@ -9,6 +9,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 2 | Dynamic chunk scheduling, exit without teardown, fast region table | TBD | 1.74 | 114 | |
 | 3 | Shared lock-free intern table + country bit matrix for distinct names | TBD | 1.63 | 14 | |
 | 4 | Dedicated unhashed note scanner, bounds-check elision in hot loop | TBD | 1.54 | 13 | |
+| 5 | Source diet: single-pass region parser, unified emit loop | TBD | 1.50 | 13 | |
 
 > **Note on Run IDs and Timings:**
 > - Board run IDs are marked as TBD and will be filled in after the first push to the live board.
