@@ -369,6 +369,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mask = intern_ref.len() - 1;
                     while offset < end {
                         let mut batch_count = 0;
+                        let mut batch_rec_id = [0u64; 16];
+                        let mut batch_cents = [0i64; 16];
+                        let mut batch_nb = [0u32; 16];
+                        let mut batch_tb = [0u32; 16];
+                        let mut batch_rid = [0usize; 16];
                         let mut batch_c_idx = [0usize; 16];
                         let mut batch_hash = [0u64; 16];
                         let mut batch_slot = [0usize; 16];
@@ -395,26 +400,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if offset < file_len && bytes[offset] == b'\n' {
                                 offset += 1;
                             }
-                            let c_idx = if rid < r2c.len() && r2c[rid] != 255 {
-                                r2c[rid] as usize
-                            } else {
-                                unmatched_idx as usize
-                            };
-                            local_aggs[c_idx].add(rec_id, cents, nb as u64, tb as u64);
-
                             let hash_val = if nh == 0 { 1 } else { nh };
                             let slot = (hash_val as usize) & mask;
-                            // Prefetch intern table slot into L1 cache
+                            // Prefetch both r2c and intern table slot into L1 cache
                             unsafe {
+                                _mm_prefetch(r2c.as_ptr().add(rid) as *const i8, _MM_HINT_T0);
                                 _mm_prefetch(
                                     intern_ref.as_ptr().add(slot) as *const i8,
                                     _MM_HINT_T0,
                                 );
                             }
-                            batch_c_idx[batch_count] = c_idx;
+                            batch_rec_id[batch_count] = rec_id;
+                            batch_cents[batch_count] = cents;
+                            batch_nb[batch_count] = nb as u32;
+                            batch_tb[batch_count] = tb as u32;
+                            batch_rid[batch_count] = rid;
                             batch_hash[batch_count] = hash_val;
                             batch_slot[batch_count] = slot;
                             batch_count += 1;
+                        }
+
+                        for i in 0..batch_count {
+                            let rid = batch_rid[i];
+                            let c_idx = if rid < r2c.len() && r2c[rid] != 255 {
+                                r2c[rid] as usize
+                            } else {
+                                unmatched_idx as usize
+                            };
+                            local_aggs[c_idx].add(
+                                batch_rec_id[i],
+                                batch_cents[i],
+                                batch_nb[i] as u64,
+                                batch_tb[i] as u64,
+                            );
+                            batch_c_idx[i] = c_idx;
                         }
 
                         let mut batch_word_idx = [0usize; 16];
