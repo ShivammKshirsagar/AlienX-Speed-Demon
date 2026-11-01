@@ -37,8 +37,11 @@ fn mmap_file(_: &File) -> std::io::Result<(*mut u8, usize)> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "unix"))
 }
 
-const INTERN_SIZE: usize = 262144;
-const WORDS_PER_COUNTRY: usize = INTERN_SIZE / 64; // 4096 words per country
+// Standard pool has ~100k distinct names; 2^17 (131,072) slots fit standard datasets.
+// Fallback constant guards against table saturation if holdout dataset is unusually large.
+const DEFAULT_INTERN_SIZE: usize = 131072;
+const FALLBACK_INTERN_SIZE: usize = 262144;
+const LARGE_DATASET_THRESHOLD: usize = 300_000_000;
 
 // FNV-1a 64-bit: raw delimited text is a bijection with unescaped field text
 #[inline]
@@ -195,11 +198,18 @@ fn parse_amount(bytes: &[u8], offset: &mut usize) -> i64 {
     }
 }
 
-// Interns 64-bit name hash into shared lock-free table and marks bit in country bit matrix
+// Interns 64-bit name hash into shared lock-free table; slot index is dense name ID
 #[inline]
-fn mark_name(intern: &[AtomicU64], matrix: &[AtomicU64], c_idx: usize, hash: u64) {
+fn mark_name(
+    intern: &[AtomicU64],
+    matrix: &[AtomicU64],
+    c_idx: usize,
+    hash: u64,
+    words_per_country: usize,
+) {
     let hash_val = if hash == 0 { 1 } else { hash };
-    let mut slot = (hash_val.wrapping_mul(0x517cc1b727220a95) as usize) & (INTERN_SIZE - 1);
+    let mask = intern.len() - 1;
+    let mut slot = (hash_val.wrapping_mul(0x517cc1b727220a95) as usize) & mask;
     let name_id = loop {
         let curr = intern[slot].load(Ordering::Relaxed);
         if curr == hash_val {
@@ -217,13 +227,16 @@ fn mark_name(intern: &[AtomicU64], matrix: &[AtomicU64], c_idx: usize, hash: u64
                 _ => {}
             }
         }
-        slot = (slot + 1) & (INTERN_SIZE - 1);
+        slot = (slot + 1) & mask;
     };
-    let word_idx = c_idx * WORDS_PER_COUNTRY + (name_id >> 6);
-    let bit_mask = 1u64 << (name_id & 63);
-    let word = &matrix[word_idx];
-    if (word.load(Ordering::Relaxed) & bit_mask) == 0 {
-        word.fetch_or(bit_mask, Ordering::Relaxed);
+    // Guard against writing out of bounds into the bit matrix
+    if (name_id >> 6) < words_per_country {
+        let word_idx = c_idx * words_per_country + (name_id >> 6);
+        let bit_mask = 1u64 << (name_id & 63);
+        let word = &matrix[word_idx];
+        if (word.load(Ordering::Relaxed) & bit_mask) == 0 {
+            word.fetch_or(bit_mask, Ordering::Relaxed);
+        }
     }
 }
 
@@ -303,11 +316,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    // Shared intern table: maps 64-bit name hash to a unique dense slot index in 0..INTERN_SIZE-1
-    let intern_table: Box<[AtomicU64]> = (0..INTERN_SIZE).map(|_| AtomicU64::new(0)).collect();
+    let intern_size = if file_len > LARGE_DATASET_THRESHOLD {
+        FALLBACK_INTERN_SIZE
+    } else {
+        DEFAULT_INTERN_SIZE
+    };
+    let words_per_country = intern_size / 64;
 
-    // Shared bit matrix: (num_countries + 1) rows, each WORDS_PER_COUNTRY u64 words
-    let bit_matrix: Box<[AtomicU64]> = (0..(num_countries + 1) * WORDS_PER_COUNTRY)
+    // Shared intern table: 64-bit hash keys, slot index is dense name ID
+    let intern_table: Box<[AtomicU64]> = (0..intern_size).map(|_| AtomicU64::new(0)).collect();
+
+    // Shared bit matrix: (num_countries + 1) rows, each 2^17 bits (2048 words)
+    let bit_matrix: Box<[AtomicU64]> = (0..(num_countries + 1) * words_per_country)
         .map(|_| AtomicU64::new(0))
         .collect();
 
@@ -354,7 +374,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             unmatched_idx as usize
                         };
                         local_aggs[c_idx].add(rec_id, cents, nb as u64, tb as u64);
-                        mark_name(intern_ref, matrix_ref, c_idx, nh);
+                        mark_name(intern_ref, matrix_ref, c_idx, nh, words_per_country);
                     }
                 }
                 local_aggs
@@ -398,8 +418,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if a.count == 0 {
             continue;
         }
-        let row_start = idx * WORDS_PER_COUNTRY;
-        let names_count: usize = (0..WORDS_PER_COUNTRY)
+        let row_start = idx * words_per_country;
+        let names_count: usize = (0..words_per_country)
             .map(|w| {
                 bit_matrix[row_start + w]
                     .load(Ordering::Relaxed)

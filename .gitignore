@@ -49,3 +49,9 @@ track-c-impl-report.md
 pre-push-report.md
 /tools/verify_gate.py
 /tools/sweep_threads.py
+/tools/expected_hashes*
+/tools/bench.patch
+/tools/run_gate.py
+/tools/setup_test_datasets.py
+/tools/bench_single.py
+/tools/gate_raw_output.txt
