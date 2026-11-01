@@ -67,6 +67,7 @@ perf.data
 opt2-report.md
 opt3-report.md
 opt4-report.md
+opt6-report.md
 
 /tools/diag_phase_d.py
 /tools/patch_instrument.py
