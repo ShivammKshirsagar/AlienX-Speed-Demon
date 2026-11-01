@@ -8,6 +8,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 1 | Rust, mmap, 12 threads, byte-level parser, FNV-1a name hashing | run-1c6f4e3d5432 | 1.90 | 118 | |
 | 2 | Dynamic chunk scheduling, exit without teardown, fast region table | TBD | 1.74 | 114 | |
 | 3 | Shared lock-free intern table + country bit matrix for distinct names | TBD | 1.63 | 14 | |
+| 4 | Dedicated unhashed note scanner, bounds-check elision in hot loop | TBD | 1.54 | 13 | |
 
 > **Note on Run IDs and Timings:**
 > - Board run IDs are marked as TBD and will be filled in after the first push to the live board.

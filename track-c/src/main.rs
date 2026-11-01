@@ -127,22 +127,22 @@ fn find_first_record_start(bytes: &[u8], data_start: usize, nominal_start: usize
     len
 }
 
-// Parses quoted or unquoted field; unescaped length is raw content minus escaped quotes / 2
+// Parses name field: returns unescaped length and 64-bit hash
+// Safety: offset < bytes.len() is maintained by chunk boundary guarantees
 #[inline]
-fn scan_field(bytes: &[u8], offset: &mut usize) -> (usize, u64) {
-    if *offset < bytes.len() && bytes[*offset] == b'"' {
+fn scan_name(bytes: &[u8], offset: &mut usize) -> (usize, u64) {
+    if unsafe { *bytes.get_unchecked(*offset) } == b'"' {
         *offset += 1;
         let (start, mut quotes) = (*offset, 0);
         loop {
-            if bytes[*offset] == b'"' {
-                if *offset + 1 < bytes.len() && bytes[*offset + 1] == b'"' {
+            let b = unsafe { *bytes.get_unchecked(*offset) };
+            if b == b'"' {
+                if unsafe { *bytes.get_unchecked(*offset + 1) } == b'"' {
                     quotes += 2;
                     *offset += 2;
                 } else {
-                    let res = (
-                        (*offset - start) - quotes / 2,
-                        hash_name(&bytes[start..*offset]),
-                    );
+                    let raw = &bytes[start..*offset];
+                    let res = (raw.len() - quotes / 2, hash_name(raw));
                     *offset += 2;
                     return res;
                 }
@@ -152,42 +152,84 @@ fn scan_field(bytes: &[u8], offset: &mut usize) -> (usize, u64) {
         }
     } else {
         let start = *offset;
-        while *offset < bytes.len() && bytes[*offset] != b',' {
+        while unsafe { *bytes.get_unchecked(*offset) } != b',' {
             *offset += 1;
         }
-        let res = (*offset - start, hash_name(&bytes[start..*offset]));
+        let raw = &bytes[start..*offset];
+        let res = (raw.len(), hash_name(raw));
         *offset += 1;
         res
+    }
+}
+
+// Parses note field: returns unescaped length without wasting cycles hashing
+#[inline]
+fn scan_note(bytes: &[u8], offset: &mut usize) -> usize {
+    if unsafe { *bytes.get_unchecked(*offset) } == b'"' {
+        *offset += 1;
+        let (start, mut quotes) = (*offset, 0);
+        loop {
+            let b = unsafe { *bytes.get_unchecked(*offset) };
+            if b == b'"' {
+                if unsafe { *bytes.get_unchecked(*offset + 1) } == b'"' {
+                    quotes += 2;
+                    *offset += 2;
+                } else {
+                    let len = (*offset - start) - quotes / 2;
+                    *offset += 2;
+                    return len;
+                }
+            } else {
+                *offset += 1;
+            }
+        }
+    } else {
+        let start = *offset;
+        while unsafe { *bytes.get_unchecked(*offset) } != b',' {
+            *offset += 1;
+        }
+        let len = *offset - start;
+        *offset += 1;
+        len
     }
 }
 
 #[inline]
 fn parse_u64(bytes: &[u8], offset: &mut usize) -> u64 {
     let mut v = 0u64;
-    while *offset < bytes.len() && bytes[*offset] != b',' {
-        v = v * 10 + (bytes[*offset] - b'0') as u64;
+    loop {
+        let b = unsafe { *bytes.get_unchecked(*offset) };
+        if b == b',' {
+            *offset += 1;
+            return v;
+        }
+        v = v * 10 + (b - b'0') as u64;
         *offset += 1;
     }
-    *offset += 1;
-    v
 }
 
 #[inline]
 fn parse_amount(bytes: &[u8], offset: &mut usize) -> i64 {
-    let neg = if *offset < bytes.len() && bytes[*offset] == b'-' {
+    let neg = if unsafe { *bytes.get_unchecked(*offset) } == b'-' {
         *offset += 1;
         true
     } else {
         false
     };
     let mut d = 0i64;
-    while *offset < bytes.len() && bytes[*offset] != b'.' {
-        d = d * 10 + (bytes[*offset] - b'0') as i64;
+    loop {
+        let b = unsafe { *bytes.get_unchecked(*offset) };
+        if b == b'.' {
+            *offset += 1;
+            break;
+        }
+        d = d * 10 + (b - b'0') as i64;
         *offset += 1;
     }
-    *offset += 1;
-    let c = d * 100 + (bytes[*offset] - b'0') as i64 * 10 + (bytes[*offset + 1] - b'0') as i64;
+    let d1 = (unsafe { *bytes.get_unchecked(*offset) } - b'0') as i64;
+    let d2 = (unsafe { *bytes.get_unchecked(*offset + 1) } - b'0') as i64;
     *offset += 2;
+    let c = d * 100 + d1 * 10 + d2;
     if neg {
         -c
     } else {
@@ -337,10 +379,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if offset + 3 <= file_len && &bytes[offset..offset + 3] == b"\xef\xbb\xbf" {
                             offset += 3;
                         }
-                        let (rec_id, (nb, nh), (tb, _), rid, cents) = (
+                        let (rec_id, (nb, nh), tb, rid, cents) = (
                             parse_u64(bytes, &mut offset),
-                            scan_field(bytes, &mut offset),
-                            scan_field(bytes, &mut offset),
+                            scan_name(bytes, &mut offset),
+                            scan_note(bytes, &mut offset),
                             parse_u64(bytes, &mut offset) as usize,
                             parse_amount(bytes, &mut offset),
                         );
