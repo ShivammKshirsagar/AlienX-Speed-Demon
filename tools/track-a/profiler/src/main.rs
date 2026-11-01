@@ -650,11 +650,13 @@ fn main() {
     }
     let endpoint_count = endpoints.len();
     let mut groups: Vec<Group> = (0..endpoint_count * HOURS).map(|_| Group::new()).collect();
+    let mut merge_spawn_ns = 0u128;
     thread::scope(|scope| {
         let mut remaining = groups.as_mut_slice();
         for (range, sources) in ranges.into_iter().zip(range_jobs) {
             let (destination, tail) = remaining.split_at_mut(range.len() * endpoint_count);
             remaining = tail;
+            let spawn_start = Instant::now();
             scope.spawn(move || {
                 for (remap, hour_maps) in sources {
                     for (hour_offset, groups) in hour_maps.into_iter().enumerate() {
@@ -671,6 +673,7 @@ fn main() {
                     }
                 }
             });
+            merge_spawn_ns += spawn_start.elapsed().as_nanos();
         }
     });
     let merge_ns = merge_start.elapsed().as_nanos();
@@ -698,11 +701,13 @@ fn main() {
     if start < groups.len() || ranges.is_empty() {
         ranges.push(start..groups.len());
     }
+    let mut selection_spawn_ns = 0u128;
     thread::scope(|scope| {
         let mut remaining = groups.as_mut_slice();
         for range in ranges {
             let (slice, tail) = remaining.split_at_mut(range.len());
             remaining = tail;
+            let spawn_start = Instant::now();
             scope.spawn(move || {
                 for group in slice.iter_mut().filter(|g| !g.latencies.is_empty()) {
                     group.latencies.sort_unstable();
@@ -712,6 +717,7 @@ fn main() {
                     group.p99 = group.latencies[(99 * n + 99) / 100 - 1];
                 }
             });
+            selection_spawn_ns += spawn_start.elapsed().as_nanos();
         }
     });
     let selection_ns = selection_start.elapsed().as_nanos();
@@ -749,17 +755,17 @@ fn main() {
     if start < HOURS || ranges.is_empty() {
         ranges.push((start..HOURS, size));
     }
+    let mut format_spawn_ns = 0u128;
     let output_buffers = thread::scope(|scope| {
-        let joins = ranges
-            .into_iter()
-            .map(|(range, capacity)| {
-                let order = &order;
-                let endpoints = &endpoints;
-                let groups = &groups;
-                let hours = &hours;
-                scope.spawn(move || format_hours(range, capacity, order, endpoints, groups, hours))
-            })
-            .collect::<Vec<_>>();
+        let mut joins = Vec::with_capacity(ranges.len());
+        for (range, capacity) in ranges {
+            let (order, endpoints, groups, hours) = (&order, &endpoints, &groups, &hours);
+            let spawn_start = Instant::now();
+            joins.push(
+                scope.spawn(move || format_hours(range, capacity, order, endpoints, groups, hours)),
+            );
+            format_spawn_ns += spawn_start.elapsed().as_nanos();
+        }
         joins
             .into_iter()
             .map(|join| join.join().expect("format worker panicked"))
@@ -790,20 +796,23 @@ fn main() {
         })
         .collect::<Vec<_>>();
     use std::os::unix::fs::FileExt;
+    let mut write_spawn_ns = 0u128;
     thread::scope(|scope| {
         for (buffer, offset) in output_buffers.into_iter().zip(offsets) {
             let file = &file;
+            let spawn_start = Instant::now();
             scope.spawn(move || {
                 file.write_all_at(&buffer, offset)
                     .expect("write output range");
             });
+            write_spawn_ns += spawn_start.elapsed().as_nanos();
         }
     });
     let write_ns = write_start.elapsed().as_nanos();
     let usage_after_write = usage();
     let memory_after_write = rss_current();
     let faults_end = page_faults();
-    eprintln!("profile mmap_ns={mmap_ns} madvise_ns={madvise_ns} boundary_ns={boundary_ns} spawn_ns={spawn_ns} parse_wall_ns={parse_ns} merge_ns={merge_ns} scatter_ns=0 selection_ns={selection_ns} endpoint_sort_ns={endpoint_sort_ns} output_format_ns={output_format_ns} write_ns={write_ns} total_main_ns={}", total_start.elapsed().as_nanos());
+    eprintln!("profile mmap_ns={mmap_ns} madvise_ns={madvise_ns} boundary_ns={boundary_ns} spawn_ns={spawn_ns} merge_spawn_ns={merge_spawn_ns} selection_spawn_ns={selection_spawn_ns} format_spawn_ns={format_spawn_ns} write_spawn_ns={write_spawn_ns} parse_wall_ns={parse_ns} merge_ns={merge_ns} scatter_ns=0 selection_ns={selection_ns} endpoint_sort_ns={endpoint_sort_ns} output_format_ns={output_format_ns} write_ns={write_ns} total_main_ns={}", total_start.elapsed().as_nanos());
     eprintln!("profile workers_started_finished_ns={worker_times:?}");
     eprintln!("profile faults_minor_major start={faults_start:?} after_map={faults_after_map:?} after_parse={faults_after_parse:?} end={faults_end:?}");
     eprintln!("profile rss_current_bytes after_map={memory_after_map} after_bounds={memory_after_bounds} after_parse={memory_after_parse} after_merge={memory_after_merge} after_selection={memory_after_selection} after_output={memory_after_output} after_write={memory_after_write}");

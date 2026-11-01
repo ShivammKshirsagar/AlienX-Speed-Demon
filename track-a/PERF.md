@@ -319,3 +319,22 @@ The final WSL run used 12 workers pinned to CPUs `0-11` on a 16-logical-CPU WSL2
 The one requested Docker board-style check passed: image size 30 MB, output SHA-256 `495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`. Its 1.87 s includes Docker startup and is not a scoring-time measurement. `cargo fmt --check` passed for both Rust manifests. The pinned Docker `FROM` lines remain unchanged; the build sets the permitted `RUSTFLAGS="-C target-cpu=x86-64-v3"`.
 
 `scc` is not installed in the environment. A nonblank, non-comment Rust-line approximation counted 489 lines in `src/main.rs`; the Dockerfile has 8 code lines, for `S≈497`. This is not an exact `scc` result. For an indicative K only, scale the board reference `T=0.169 s`, `M=68 MB` by the same-method WSL timing ratio `0.110/0.305` and by the ratio of WSL peak RSS after subtracting the 238,836,234-byte input mapping. This gives estimated `T≈0.06095 s`, `M≈53.19 MB`, `S≈497`, and `K≈22.11` (about 67.23 points) from the supplied formula. These are estimates, not board measurements; the `K≥32` target was not reached.
+## Track A optimization round: 2026-11-01
+
+This section is appended to the existing performance history. Earlier entries above remain in this file. New local measurements are from the WSL A/B records under `tools/track-a/`; no board run IDs were supplied for this round.
+
+| Step | Change | Evidence | Board run ID | Result |
+|---|---|---|---|---|
+| a | Exit with `_exit(0)` after output | 20 alternating runs: min/median 112.397/124.058 -> 98.428/120.405 ms; RSS proxy 43,026 -> 42,854 KB | local WSL measurement | Kept |
+| b | Shared-mapped output with positioned-write fallback | 20 alternating runs: min/median 94.807/114.968 -> 82.814/105.503 ms; RSS proxy 42,866 -> 50,034 KB | local WSL measurement | Kept; selected shipped candidate by estimated K |
+| c | Atomic 96-chunk scheduling | Static 104.725/131.860 vs dynamic 113.162/126.414 ms; RSS proxy 65,574 vs 67,318 KB | local WSL measurement | Reverted; min slower and memory higher |
+| d | Flat per-worker state, exact latency storage, parallel prefix/scatter | Min/median 116.950/132.194 -> 99.090/113.030 ms; RSS proxy 66,402 -> 50,974 KB | local WSL measurement | Kept in candidate c1 |
+| e | Open-address endpoint table and previous-endpoint cache | Total min 107.938 -> 104.616 ms; parse median 49.583 -> 48.470 ms | local WSL measurement | Reverted; below the required gain |
+| f | Persistent worker team | Min/median 121.657/139.196 -> 115.007/128.132 ms; RSS proxy 50,306 -> 52,586 KB | local WSL measurement | Kept in candidate c1 |
+| g | Arithmetic/SWAR parsing and combined AVX2 delimiter scan | Min/median 115.224/131.337 -> 108.595/129.201 ms; RSS proxy 52,586 KB both | local WSL measurement | Kept in candidate c1 |
+| h | Partial percentile selection | Selection phase median improved 18.5%; full-sort vs partial-selection min/median 97.514/132.889 vs 105.656/123.060 ms | local WSL measurement | Kept in candidate c1 under the phase gate |
+| i | Release packed records after scatter; exact 4-byte latency array | Included in step d; no separate A/B | local WSL measurement | Kept as part of d |
+
+The shared-mmap B2 source is currently in `track-a/src/main.rs`; Rust plus Dockerfile count is 590 physical lines, with a local nonblank/noncomment estimate S=539. Its measured WSL min/median was 82.814/105.503 ms and RSS proxy was 50,034 KB. Applying the supplied `T_board=0.55*WSL min` and score formula with RSS proxy 50,034/1024 MiB and S=539 gives estimated board T=0.0455 s, K about 25.7, or about 70.5 points. This is not a board result and the final fixture/reference sweep remains pending because WSL launch returned `Wsl/Service/E_ACCESSDENIED`.
+
+The instrumented phase snapshot belongs to candidate c1, not the currently selected B2 source: parse 60.004 ms, merge/scatter 37.455 ms, selection 4.342 ms, formatting 4.469 ms, writing 13.189 ms, main-to-exit 130.127 ms. The exact B2 phase table was not captured. The parser ablation ladder was 40.2, 61.7, 104.1, 130.8, 179.5, and 217.4 ns/line at 12 threads; at one thread it was 24.7, 38.9, 65.5, 67.7, 78.0, and 100.0 ns/line. Group bookkeeping was the largest incremental cost. See `tools/track-a/EXPERIMENTS.md` for the full measurements and candidate details.
