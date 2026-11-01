@@ -38,18 +38,15 @@ fn main() {
         .expect("start profiled solution");
     let observed_exit_ns = monotonic_ns();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let lifecycle = stderr
-        .lines()
-        .find(|line| line.starts_with("profile lifecycle "))
-        .expect("child lifecycle markers missing");
-    let startup_ns = value(lifecycle, "main_start_ns=") - launch_ns;
-    let exit_ns = observed_exit_ns - value(lifecycle, "exit_marker_ns=");
     print!("{}", String::from_utf8_lossy(&output.stdout));
     eprint!("{stderr}");
-    eprintln!(
-        "wrapper lifecycle startup_ns={startup_ns} exit_ns={exit_ns} elapsed_ns={}",
-        observed_exit_ns - launch_ns
-    );
+    if let Some(lifecycle) = stderr.lines().find(|line| line.starts_with("profile lifecycle ")) {
+        let startup_ns = value(lifecycle, "main_start_ns=") - launch_ns;
+        let exit_ns = observed_exit_ns - value(lifecycle, "exit_marker_ns=");
+        eprintln!("wrapper lifecycle startup_ns={startup_ns} exit_ns={exit_ns} elapsed_ns={}", observed_exit_ns - launch_ns);
+    } else {
+        eprintln!("wrapper elapsed_ns={}", observed_exit_ns - launch_ns);
+    }
     if !output.status.success() {
         std::process::exit(output.status.code().unwrap_or(1));
     }
