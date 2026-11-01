@@ -37,3 +37,26 @@ One instrumented run of the current source measured parse 60.004 ms, merge/scatt
 ## Validation status
 
 The recorded checks from the active WSL session include seed-1 full output hash checks throughout A/B, worked example, empty input, and sample seed 2 after the persistent-pool and parser changes. The requested final fixture/reference sweep is still pending: WSL currently returns `Wsl/Service/E_ACCESSDENIED` before starting a distribution. No correctness result is claimed for checks that could not run here.
+
+## 2026-11-01 structural pipeline comparison
+
+One final 30-round same-session Docker Desktop comparison interleaved baseline and n1, n2, and n3. Each measured invocation used the 12-CPU, 8 GB, read-only, no-network container flags, warm input cache, and checked the seed-1 SHA-256. CPU is cgroup `usage_usec` delta (all container user+system CPU); memory is cgroup `memory.peak`. These Docker Desktop bind-mount measurements are local and are used only for the requested paired gate.
+
+| Experiment | Variant | CPU min / median (s) | Wall min / median (s) | `memory.peak` median (MB) | S | K relative to baseline | Checks | Decision |
+|---|---|---:|---:|---:|---:|---:|---|---|
+| N1 | One-pass packed records, merged flat endpoint state, parallel prefix/scatter | 1.435 / 1.759 | 1.045 / 1.312 | 292.32 | 970 | 0.970 | Worked, empty, single, chunk-boundary, equal-time, hour-boundary, 5,000 endpoints, sample 2/3/7, full seed 2 reference, seed 1 hash: pass | Reverted: CPU minimum improved 13.9%, but estimated K lower |
+| N2 | N1 plus previous-endpoint cache | 1.467 / 1.704 | 1.116 / 1.252 | 293.03 | 970 | 0.959 | Same full check set: pass | Reverted: CPU minimum improved 11.94%, below the >=12% gate; estimated K lower |
+| N3 | Two-pass count/fill with stable chunk ownership and no packed-record array | 1.724 / 2.048 | 1.099 / 1.301 | 277.01 | 967 | 0.895 | Same full check set: pass | Reverted: memory fell 3.0%, but CPU minimum was 3.5% slower and K lower |
+
+The phase snapshots are single in-process Docker runs, collected from tools-only instrumented copies; they are diagnostic and not used as the candidate gate:
+
+| Phase (ms) | Baseline snapshot2 | N3 two-pass |
+|---|---:|---:|
+| Parse pass 1 | 955.3 | 905.7 |
+| Merge, prefix, scatter/fill | 13.8 | 101.5 |
+| Selection | 10.6 | 12.0 |
+| Format | 9.1 | included with output |
+| Write | 76.0 | included with output |
+| Output setup + format + write | not split | 107.8 |
+
+Parse remained over 80% of profiled in-process time for both. The existing measured parse ladder above attributes the largest incremental costs to endpoint lookup (+42.4 ns/line) and per-line bookkeeping (+48.7 ns/line), followed by latency storage (+37.9 ns/line). The one-entry endpoint cache was tried in N2; it met only the CPU-minimum condition, not the K condition. The two-pass experiment removed packed records from peak memory but paid for a second scan and its cursor work. No candidate cleared both required gates; `track-a/src` remains the byte-identical baseline snapshot2. No new board run ID or local timing was added to `track-a/PERF.md`.

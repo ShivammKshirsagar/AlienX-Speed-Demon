@@ -1,0 +1,13 @@
+0	alpha edge
+1	token next alpha
+2	
+3	misc beta
+4	alpha token
+5	edge
+6	token
+7	alpha edge token
+8	
+9	next token
+10	beta alpha
+11	z
+12	alpha token

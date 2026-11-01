@@ -1,0 +1,3 @@
+BOOL alpha
+BOOL beta
+PHRASE "beta alpha"
