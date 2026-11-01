@@ -60,3 +60,11 @@ The phase snapshots are single in-process Docker runs, collected from tools-only
 | Output setup + format + write | not split | 107.8 |
 
 Parse remained over 80% of profiled in-process time for both. The existing measured parse ladder above attributes the largest incremental costs to endpoint lookup (+42.4 ns/line) and per-line bookkeeping (+48.7 ns/line), followed by latency storage (+37.9 ns/line). The one-entry endpoint cache was tried in N2; it met only the CPU-minimum condition, not the K condition. The two-pass experiment removed packed records from peak memory but paid for a second scan and its cursor work. No candidate cleared both required gates; `track-a/src` remains the byte-identical baseline snapshot2. No new board run ID or local timing was added to `track-a/PERF.md`.
+
+## 2026-11-01 board-loop candidate v7
+
+| Candidate | Change | Checks | S estimate | Full-input RSS proxy | Board evidence / status |
+|---|---|---|---:|---:|---|
+| v7 | Bundle v1 `_exit(0)` path with v2 arithmetic-hour, SWAR-latency, and paired AVX2 delimiter parser | Offline Docker build; worked, empty, single-line, 12-worker chunk-boundary, equal-time, hour-boundary, 5,000-endpoint reference, samples 2/3/7, full seed 2 reference, and full seed 1 hash all passed | 524 | 42,022 KB (VmHWM 275,260 KB minus 238,836,234-byte input mapping); control proxy 42,498 KB | Candidate C handoff only; no board run yet; no local timing used |
+
+The v2+v4 parse-arena bundle was retained at `tools/track-a/candidates/parse-arena-bundle/` but not selected because the two-pass parse rescans each line. WSL and remote board-feed/Git access were unavailable; `track-a/` remains the exact control. See `LOOP_STATE.md` for the manual C/K/C procedure. PERF.md history was left intact.
