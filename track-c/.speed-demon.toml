@@ -1,0 +1,5 @@
+# Read by the board and the scoring harness.
+track = "c"
+team = "AlienX"
+language = "rust"
+dependency_count = 0
