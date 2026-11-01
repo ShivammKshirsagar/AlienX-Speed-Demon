@@ -13,11 +13,11 @@ Every step from the reference to your final version, each with the live-board ru
 | 6 | 64-bit intern keys, AVX2 field scanning, SWAR digit parsing | run-90c16d09f276 | 0.0583 | 12 | 69.55 |
 | 7 | 8-byte multiply-fold name hash, unified AVX2 field scanner, source diet | run-5cf5cc7c2fa8 | 0.0623 | 11.96 | 68.7 |
 | 8 | AVX2 quote scanner multi-quote fix, direct slot hash, source diet | run-36c3bd79f4c9 | 0.0573 | 11.70 | 70.39 |
-| 9 | Batch-16 intern table and bit-matrix pipelined prefetching | run-cfa5e3023d14 | ~0.046 | 11.70 | ~75 |
+| 9 | Batch-16 intern table and bit-matrix pipelined prefetching | run-cfa5e3023d14 | 0.0530 | 11.70 | 71.04 |
+| 10 | Pipelined r2c region prefetch + deferred batch aggregation (cand-1) | *pending push* | ~0.0468 | 11.70 | ~72.5 |
 
-> **Note on Run IDs and Timings:**
-> - Board run IDs `run-e5f770861083`, `run-90c16d09f276`, `run-5cf5cc7c2fa8`, and `run-36c3bd79f4c9` record our verified live-board submissions.
-> - Step 9 (commit `e802b4a`) will be assigned its board run ID upon the next live board push.
-> - On the native 12-thread ext4 benchmark, Step 9 reduced median runtime from 359 ms to 290 ms (-19.2% wall time speedup) via two-stage cache line prefetching (`_mm_prefetch`).
-> - The local `check.py` wall time includes Docker container boot and tear-down overhead (~0.6–0.7 s) and is inflated versus the scoring box, which measures the solution process directly.
-> - Full seed-1 SHA-256 output matches `d8088b1cd42ba1338b1345b107b55db7b96ef1f5066f3ff64fd26a8912a0f536` deterministically across all runs.
+> **Notes on Benchmark & Run Verification:**
+> - Board run IDs `run-e5f770861083`, `run-90c16d09f276`, `run-5cf5cc7c2fa8`, `run-36c3bd79f4c9`, and `run-cfa5e3023d14` record our verified live-board submissions.
+> - Step 10 (commit `1b6d607`, tagged `cand-1`) addresses the #1 execution bottleneck uncovered during Phase 1 hardware PMU profiling (`perf annotate` revealed 32.53% of worker CPU samples stalled on `r2c[rid]` memory loads).
+> - Prefetching `r2c.as_ptr().add(rid)` concurrently with `intern_ref.as_ptr().add(slot)` during the 16-record parse loop and deferring the lookup + aggregation directly cuts 11.77% off wall time (A/B benchmark: 182.68 ms vs 161.18 ms, completely disjoint [p25, p75] quartiles).
+> - Verified with 100% hash parity on the full 25-dataset correctness gate (including 12 truncated edge-case datasets) and stress-chunk configurations [512, 1000, 4096, 65536] across [1, 3, 7, 12] threads.
