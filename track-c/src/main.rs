@@ -254,47 +254,6 @@ unsafe fn scan_field<const HASH: bool>(bytes: &[u8], offset: &mut usize) -> (usi
     }
 }
 
-// Interns 64-bit name hash into shared lock-free table; slot index is dense name ID
-#[inline]
-fn mark_name(
-    intern: &[AtomicU64],
-    matrix: &[AtomicU64],
-    c_idx: usize,
-    hash: u64,
-    words_per_country: usize,
-) {
-    let hash_val = if hash == 0 { 1 } else { hash };
-    let mask = intern.len() - 1;
-    let mut slot = (hash_val as usize) & mask;
-    let name_id = loop {
-        let curr = intern[slot].load(Ordering::Relaxed);
-        if curr == hash_val {
-            break slot;
-        }
-        if curr == 0 {
-            match intern[slot].compare_exchange_weak(
-                0,
-                hash_val,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break slot,
-                Err(actual) if actual == hash_val => break slot,
-                _ => {}
-            }
-        }
-        slot = (slot + 1) & mask;
-    };
-    // Guard against writing out of bounds into the bit matrix
-    if (name_id >> 6) < words_per_country {
-        let word = &matrix[c_idx * words_per_country + (name_id >> 6)];
-        let bit = 1u64 << (name_id & 63);
-        if (word.load(Ordering::Relaxed) & bit) == 0 {
-            word.fetch_or(bit, Ordering::Relaxed);
-        }
-    }
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let data_dir = args.get(1).map_or("/data", |s| s.as_str());
@@ -407,33 +366,104 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut offset = b_ref[chunk_idx];
                     let end = b_ref[chunk_idx + 1];
 
+                    let mask = intern_ref.len() - 1;
                     while offset < end {
-                        if offset + 3 <= file_len && &bytes[offset..offset + 3] == b"\xef\xbb\xbf" {
-                            offset += 3;
+                        let mut batch_count = 0;
+                        let mut batch_c_idx = [0usize; 16];
+                        let mut batch_hash = [0u64; 16];
+                        let mut batch_slot = [0usize; 16];
+
+                        while offset < end && batch_count < 16 {
+                            if offset + 3 <= file_len
+                                && &bytes[offset..offset + 3] == b"\xef\xbb\xbf"
+                            {
+                                offset += 3;
+                            }
+                            // Safety: offset is within mapped file and fields adhere to CSV spec
+                            let (rec_id, (nb, nh), (tb, _), rid, cents) = unsafe {
+                                (
+                                    parse_u64(bytes, &mut offset),
+                                    scan_field::<true>(bytes, &mut offset),
+                                    scan_field::<false>(bytes, &mut offset),
+                                    parse_u64(bytes, &mut offset) as usize,
+                                    parse_amount(bytes, &mut offset),
+                                )
+                            };
+                            if offset < file_len && bytes[offset] == b'\r' {
+                                offset += 1;
+                            }
+                            if offset < file_len && bytes[offset] == b'\n' {
+                                offset += 1;
+                            }
+                            let c_idx = if rid < r2c.len() && r2c[rid] != 255 {
+                                r2c[rid] as usize
+                            } else {
+                                unmatched_idx as usize
+                            };
+                            local_aggs[c_idx].add(rec_id, cents, nb as u64, tb as u64);
+
+                            let hash_val = if nh == 0 { 1 } else { nh };
+                            let slot = (hash_val as usize) & mask;
+                            // Prefetch intern table slot into L1 cache
+                            unsafe {
+                                _mm_prefetch(
+                                    intern_ref.as_ptr().add(slot) as *const i8,
+                                    _MM_HINT_T0,
+                                );
+                            }
+                            batch_c_idx[batch_count] = c_idx;
+                            batch_hash[batch_count] = hash_val;
+                            batch_slot[batch_count] = slot;
+                            batch_count += 1;
                         }
-                        // Safety: offset is within mapped file and fields adhere to CSV spec
-                        let (rec_id, (nb, nh), (tb, _), rid, cents) = unsafe {
-                            (
-                                parse_u64(bytes, &mut offset),
-                                scan_field::<true>(bytes, &mut offset),
-                                scan_field::<false>(bytes, &mut offset),
-                                parse_u64(bytes, &mut offset) as usize,
-                                parse_amount(bytes, &mut offset),
-                            )
-                        };
-                        if offset < file_len && bytes[offset] == b'\r' {
-                            offset += 1;
+
+                        let mut batch_word_idx = [0usize; 16];
+                        let mut batch_name_id = [0usize; 16];
+                        for i in 0..batch_count {
+                            let (c_idx, hash_val, mut slot) =
+                                (batch_c_idx[i], batch_hash[i], batch_slot[i]);
+                            let name_id = loop {
+                                let curr = intern_ref[slot].load(Ordering::Relaxed);
+                                if curr == hash_val {
+                                    break slot;
+                                }
+                                if curr == 0 {
+                                    match intern_ref[slot].compare_exchange_weak(
+                                        0,
+                                        hash_val,
+                                        Ordering::Relaxed,
+                                        Ordering::Relaxed,
+                                    ) {
+                                        Ok(_) => break slot,
+                                        Err(actual) if actual == hash_val => break slot,
+                                        _ => {}
+                                    }
+                                }
+                                slot = (slot + 1) & mask;
+                            };
+                            batch_name_id[i] = name_id;
+                            if (name_id >> 6) < words_per_country {
+                                let word_idx = c_idx * words_per_country + (name_id >> 6);
+                                batch_word_idx[i] = word_idx;
+                                unsafe {
+                                    _mm_prefetch(
+                                        matrix_ref.as_ptr().add(word_idx) as *const i8,
+                                        _MM_HINT_T0,
+                                    );
+                                }
+                            }
                         }
-                        if offset < file_len && bytes[offset] == b'\n' {
-                            offset += 1;
+
+                        for i in 0..batch_count {
+                            let name_id = batch_name_id[i];
+                            if (name_id >> 6) < words_per_country {
+                                let word = &matrix_ref[batch_word_idx[i]];
+                                let bit = 1u64 << (name_id & 63);
+                                if (word.load(Ordering::Relaxed) & bit) == 0 {
+                                    word.fetch_or(bit, Ordering::Relaxed);
+                                }
+                            }
                         }
-                        let c_idx = if rid < r2c.len() && r2c[rid] != 255 {
-                            r2c[rid] as usize
-                        } else {
-                            unmatched_idx as usize
-                        };
-                        local_aggs[c_idx].add(rec_id, cents, nb as u64, tb as u64);
-                        mark_name(intern_ref, matrix_ref, c_idx, nh, words_per_country);
                     }
                 }
                 local_aggs
