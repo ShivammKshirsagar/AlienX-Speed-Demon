@@ -7,15 +7,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 #[cfg(unix)]
 fn mmap_file(f: &File) -> std::io::Result<(*mut u8, usize)> {
     extern "C" {
-        fn mmap(
-            a: *mut std::ffi::c_void,
-            l: usize,
-            p: i32,
-            fl: i32,
-            d: i32,
-            o: i64,
-        ) -> *mut std::ffi::c_void;
-        fn madvise(a: *mut std::ffi::c_void, l: usize, adv: i32) -> i32;
+        fn mmap(a: *mut u8, l: usize, p: i32, fl: i32, d: i32, o: i64) -> *mut u8;
+        fn madvise(a: *mut u8, l: usize, adv: i32) -> i32;
     }
     use std::os::unix::io::AsRawFd;
     let len = f.metadata()?.len() as usize;
@@ -24,14 +17,12 @@ fn mmap_file(f: &File) -> std::io::Result<(*mut u8, usize)> {
     }
     // Safety: passing valid fd with PROT_READ (1) and MAP_PRIVATE (2)
     let ptr = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, f.as_raw_fd(), 0) };
-    if ptr == !0 as *mut std::ffi::c_void {
+    if ptr == !0 as *mut u8 {
         return Err(std::io::Error::last_os_error());
     }
     // Safety: ptr and len are valid; MADV_WILLNEED = 3 triggers kernel readahead
-    unsafe {
-        madvise(ptr, len, 3);
-    }
-    Ok((ptr as *mut u8, len))
+    unsafe { madvise(ptr, len, 3) };
+    Ok((ptr, len))
 }
 #[cfg(not(unix))]
 fn mmap_file(_: &File) -> std::io::Result<(*mut u8, usize)> {
@@ -51,8 +42,7 @@ fn hash_name(b: &[u8]) -> u64 {
         return 0;
     }
     const K: u64 = 0x517cc1b727220a95;
-    let mut h = (len as u64).wrapping_mul(K);
-    let mut i = 0;
+    let (mut h, mut i) = ((len as u64).wrapping_mul(K), 0);
     while i + 8 <= len {
         // Safety: i + 8 <= len <= b.len(), valid unaligned 8-byte read
         let val = unsafe { (b.as_ptr().add(i) as *const u64).read_unaligned() };
@@ -113,13 +103,12 @@ impl CountryAgg {
     }
 }
 
-fn write_cents<W: Write>(out: &mut W, c: i64) -> std::io::Result<()> {
-    if c < 0 {
-        out.write_all(b"-")?;
-    }
-    write!(
-        out,
-        "{}.{:02}",
+// Formats signed cents into decimal string without floating point formatting overhead
+#[inline]
+fn fmt_cents(c: i64) -> String {
+    format!(
+        "{}{}.{:02}",
+        if c < 0 { "-" } else { "" },
         c.unsigned_abs() / 100,
         c.unsigned_abs() % 100
     )
@@ -201,8 +190,7 @@ unsafe fn scan_field<const HASH: bool>(bytes: &[u8], offset: &mut usize) -> (usi
     // Safety: caller guarantees offset is within mapped CSV record bounds
     if *bytes.get_unchecked(*offset) == b'"' {
         *offset += 1;
-        let start = *offset;
-        let mut curr = *offset;
+        let (start, mut curr) = (*offset, *offset);
         let quote_vec = _mm256_set1_epi8(b'"' as i8);
         while curr + 32 <= bytes.len() {
             // Safety: curr + 32 <= bytes.len() ensures readable 32-byte chunk
@@ -210,7 +198,7 @@ unsafe fn scan_field<const HASH: bool>(bytes: &[u8], offset: &mut usize) -> (usi
             let mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, quote_vec)) as u32;
             if mask != 0 {
                 let k = mask.trailing_zeros() as usize;
-                if mask.count_ones() == 1 && k < 31 {
+                if curr + k + 1 < bytes.len() && *bytes.get_unchecked(curr + k + 1) != b'"' {
                     // Safety: slice within mapped bounds
                     let raw = bytes.get_unchecked(start..curr + k);
                     *offset = curr + k + 2; // skip closing quote and delimiter comma
@@ -240,8 +228,7 @@ unsafe fn scan_field<const HASH: bool>(bytes: &[u8], offset: &mut usize) -> (usi
             }
         }
     } else {
-        let start = *offset;
-        let mut curr = *offset;
+        let (start, mut curr) = (*offset, *offset);
         let comma_vec = _mm256_set1_epi8(b',' as i8);
         while curr + 32 <= bytes.len() {
             // Safety: curr + 32 <= bytes.len() ensures readable 32-byte chunk
@@ -278,7 +265,7 @@ fn mark_name(
 ) {
     let hash_val = if hash == 0 { 1 } else { hash };
     let mask = intern.len() - 1;
-    let mut slot = (hash_val.wrapping_mul(0x517cc1b727220a95) as usize) & mask;
+    let mut slot = (hash_val as usize) & mask;
     let name_id = loop {
         let curr = intern[slot].load(Ordering::Relaxed);
         if curr == hash_val {
@@ -314,7 +301,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = args.get(2).map_or("/out", |s| s.as_str());
 
     // 1. Build flat direct-lookup table from regions.csv in a single fast pass
-    let reg_data = std::fs::read(format!("{}/regions.csv", data_dir))?;
+    let reg_data = std::fs::read(format!("{data_dir}/regions.csv"))?;
     let mut country_lut = [255u8; 17576]; // 26^3 L1 table
     let mut countries = Vec::with_capacity(256);
     let mut region_to_country = vec![255u8; 1048576];
@@ -356,7 +343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let unmatched_idx = num_countries as u8;
 
     // 2. Mmap records.csv
-    let rec_file = File::open(format!("{}/records.csv", data_dir))?;
+    let rec_file = File::open(format!("{data_dir}/records.csv"))?;
     let (ptr, file_len) = mmap_file(&rec_file)?;
     // Safety: ptr and file_len are valid from successful mmap
     let bytes = unsafe { std::slice::from_raw_parts(ptr, file_len) };
@@ -470,7 +457,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sorted_indices: Vec<usize> = (0..num_countries).collect();
     sorted_indices.sort_unstable_by_key(|&i| countries[i]);
 
-    let mut out = BufWriter::new(File::create(format!("{}/aggregates.txt", out_dir))?);
+    let mut out = BufWriter::new(File::create(format!("{out_dir}/aggregates.txt"))?);
     for idx in sorted_indices
         .into_iter()
         .chain(std::iter::once(unmatched_idx as usize))
@@ -493,13 +480,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .sum();
 
-        write!(out, "{name} {} {} ", a.count, a.id_sum)?;
-        write_cents(&mut out, a.amount_sum)?;
-        write!(out, " ")?;
-        write_cents(&mut out, a.amount_min)?;
-        write!(out, " ")?;
-        write_cents(&mut out, a.amount_max)?;
-        writeln!(out, " {names_count} {} {}", a.name_bytes, a.note_bytes)?;
+        writeln!(
+            out,
+            "{name} {} {} {} {} {} {names_count} {} {}",
+            a.count,
+            a.id_sum,
+            fmt_cents(a.amount_sum),
+            fmt_cents(a.amount_min),
+            fmt_cents(a.amount_max),
+            a.name_bytes,
+            a.note_bytes
+        )?;
     }
     out.flush()?;
 
