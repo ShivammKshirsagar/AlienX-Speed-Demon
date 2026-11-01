@@ -14,7 +14,7 @@ Every step from the reference to your final version, each with the live-board ru
 | 7 | 8-byte multiply-fold name hash, unified AVX2 field scanner, source diet | run-5cf5cc7c2fa8 | 0.0623 | 11.96 | 68.7 |
 | 8 | AVX2 quote scanner multi-quote fix, direct slot hash, source diet | run-36c3bd79f4c9 | 0.0573 | 11.70 | 70.39 |
 | 9 | Batch-16 intern table and bit-matrix pipelined prefetching | run-cfa5e3023d14 | 0.0530 | 11.70 | 71.04 |
-| 10 | Pipelined r2c region prefetch + deferred batch aggregation (cand-1) | *pending push* | ~0.0468 | 11.70 | ~72.5 |
+| 10 | Pipelined r2c region prefetch + deferred batch aggregation (cand-1) | run-b2df13cff998 | ~0.0468 | 11.70 | 71.24 |
 
 > **Notes on Benchmark & Run Verification:**
 > - Board run IDs `run-e5f770861083`, `run-90c16d09f276`, `run-5cf5cc7c2fa8`, `run-36c3bd79f4c9`, and `run-cfa5e3023d14` record our verified live-board submissions.
