@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 const HOURS: usize = 72;
@@ -137,6 +136,14 @@ fn find_byte(bytes: &[u8], needle: u8) -> Option<usize> {
     bytes.iter().position(|&byte| byte == needle)
 }
 
+fn parse_range<'a>(data: &'a [u8], start: usize, end: usize) -> Local<'a> {
+    let mut local = Local::new();
+    let mut pos = start;
+    parse_into(data, &mut pos, end, &mut local);
+    assert_eq!(pos, end);
+    local
+}
+
 fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local<'a>) {
     while *pos < end {
         let line_end = find_byte(&data[*pos..end], b'\n').map_or(end, |n| *pos + n);
@@ -158,7 +165,7 @@ fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local
         if line[status_start] == b'5' {
             group.errors += 1;
         }
-        *pos = if line_end < end { line_end + 1 } else { end };
+        *pos = line_end + 1;
     }
 }
 
@@ -304,12 +311,10 @@ fn main() {
         .map_or(1, usize::from)
         .min(MAX_THREADS)
         .min(data.len().max(1));
-    const CHUNKS: usize = 96;
-    let chunks = CHUNKS.max(workers);
-    let mut bounds = Vec::with_capacity(chunks + 1);
+    let mut bounds = Vec::with_capacity(workers + 1);
     bounds.push(0);
-    for i in 1..chunks {
-        let mut p = data.len() * i / chunks;
+    for i in 1..workers {
+        let mut p = data.len() * i / workers;
         while p < data.len() && data[p - 1] != b'\n' {
             p += 1;
         }
@@ -317,29 +322,15 @@ fn main() {
     }
     bounds.push(data.len());
 
-    let next_chunk = AtomicUsize::new(0);
     let mut locals = thread::scope(|scope| {
-        let joins = (0..workers)
-            .map(|_| {
-                let next_chunk = &next_chunk;
-                let bounds = &bounds;
-                scope.spawn(move || {
-                    let mut local = Local::new();
-                    loop {
-                        let chunk = next_chunk.fetch_add(1, Ordering::Relaxed);
-                        if chunk + 1 >= bounds.len() {
-                            break;
-                        }
-                        let mut pos = bounds[chunk];
-                        parse_into(data, &mut pos, bounds[chunk + 1], &mut local);
-                    }
-                    local
-                })
-            })
-            .collect::<Vec<_>>();
+        let mut joins = Vec::with_capacity(workers);
+        for pair in bounds.windows(2) {
+            let (start, end) = (pair[0], pair[1]);
+            joins.push(scope.spawn(move || parse_range(data, start, end)));
+        }
         joins
             .into_iter()
-            .map(|join| join.join().expect("parser thread panicked"))
+            .map(|j| j.join().expect("parser thread panicked"))
             .collect::<Vec<_>>()
     });
 
@@ -512,7 +503,6 @@ fn main() {
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
-        .read(true)
         .write(true)
         .truncate(true)
         .open(output)
@@ -528,45 +518,7 @@ fn main() {
             start
         })
         .collect::<Vec<_>>();
-    use std::os::unix::{fs::FileExt, io::AsRawFd};
-    unsafe extern "C" {
-        fn mmap(
-            addr: *mut std::ffi::c_void,
-            length: usize,
-            prot: i32,
-            flags: i32,
-            fd: i32,
-            offset: isize,
-        ) -> *mut std::ffi::c_void;
-        fn munmap(addr: *mut std::ffi::c_void, length: usize) -> i32;
-        fn _exit(status: i32) -> !;
-    }
-    if total_size != 0 {
-        // SAFETY: the output file is open read/write and was extended to `total_size` bytes.
-        let mapped = unsafe { mmap(std::ptr::null_mut(), total_size, 3, 1, file.as_raw_fd(), 0) };
-        if mapped as isize != -1 {
-            let address = mapped as usize;
-            thread::scope(|scope| {
-                for (buffer, offset) in output_buffers.into_iter().zip(offsets) {
-                    scope.spawn(move || {
-                        // SAFETY: each prefix-summed output range is disjoint and fits the map;
-                        // the source buffer remains alive for the complete copy.
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                buffer.as_ptr(),
-                                (address as *mut u8).add(offset as usize),
-                                buffer.len(),
-                            );
-                        }
-                    });
-                }
-            });
-            // SAFETY: `mapped` and `total_size` are exactly the successful mmap result.
-            unsafe { munmap(mapped, total_size) };
-            // SAFETY: every output range has been copied and all copy workers have joined.
-            unsafe { _exit(0) }
-        }
-    }
+    use std::os::unix::fs::FileExt;
     thread::scope(|scope| {
         for (buffer, offset) in output_buffers.into_iter().zip(offsets) {
             let file = &file;
@@ -576,6 +528,6 @@ fn main() {
             });
         }
     });
-    // SAFETY: all positioned output writes have joined and completed before process exit.
-    unsafe { _exit(0) }
+    drop(mapping);
+    std::process::exit(0);
 }

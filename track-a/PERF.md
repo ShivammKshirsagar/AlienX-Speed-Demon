@@ -338,3 +338,19 @@ This section is appended to the existing performance history. Earlier entries ab
 The shared-mmap B2 source is currently in `track-a/src/main.rs`; Rust plus Dockerfile count is 590 physical lines, with a local nonblank/noncomment estimate S=539. Its measured WSL min/median was 82.814/105.503 ms and RSS proxy was 50,034 KB. Applying the supplied `T_board=0.55*WSL min` and score formula with RSS proxy 50,034/1024 MiB and S=539 gives estimated board T=0.0455 s, K about 25.7, or about 70.5 points. This is not a board result and the final fixture/reference sweep remains pending because WSL launch returned `Wsl/Service/E_ACCESSDENIED`.
 
 The instrumented phase snapshot belongs to candidate c1, not the currently selected B2 source: parse 60.004 ms, merge/scatter 37.455 ms, selection 4.342 ms, formatting 4.469 ms, writing 13.189 ms, main-to-exit 130.127 ms. The exact B2 phase table was not captured. The parser ablation ladder was 40.2, 61.7, 104.1, 130.8, 179.5, and 217.4 ns/line at 12 threads; at one thread it was 24.7, 38.9, 65.5, 67.7, 78.0, and 100.0 ns/line. Group bookkeeping was the largest incremental cost. See `tools/track-a/EXPERIMENTS.md` for the full measurements and candidate details.
+
+## Board variants (2026-11)
+
+These are single-change variants built from the source above. No board result has been supplied yet; fill in the author-run ID and board metrics after each push. No local timing claims are recorded here.
+
+| Step | Change | Board run ID | Board T / M / S / K | Status |
+|---|---|---|---|---|
+| v1 | `_exit(0)` after output | RUN-ID-TBD | TBD | Delivered candidate; board result pending |
+| v2 | Arithmetic/SWAR/AVX2 line parser | RUN-ID-TBD | TBD | Delivered candidate; board result pending |
+| v3 | Open-address endpoint lookup | RUN-ID-TBD | TBD | Delivered candidate; board result pending |
+| v4 | Per-worker bump arena for grouped latencies | RUN-ID-TBD | TBD | Delivered candidate; board result pending |
+| v5 | Partial percentile selection | RUN-ID-TBD | TBD | Delivered candidate; board result pending |
+
+## Selection correction for board evidence
+
+The preceding WSL-based selection note is superseded. The author supplied the real board comparison: baseline commit b4d1b99 scored 66.975 points (K=21.85, T=0.066 s, M=47 MB, S=497), while the flat-state/shared-output rewrite scored 62.698 (T=0.081 s, M=71 MB, S=540). The active `track-a/src/main.rs` has been restored to the baseline source and matches `tools/track-a/baseline-snapshot2/src/main.rs` byte-for-byte. The v1-v5 rows above are independent board candidates; no local timing or score is used to choose among them.
