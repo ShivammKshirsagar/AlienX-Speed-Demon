@@ -56,3 +56,13 @@ pre-push-report.md
 /tools/bench_single.py
 /tools/gate_raw_output.txt
 /tools/apply_phase2.py
+/tools/bench_native.py
+/tools/compare_avx2_scalar.py
+/tools/run_comparison.py
+
+perf.data
+/tools/test_hash_8.rs
+
+/tools/bench_simple.py
+opt2-report.md
+opt3-report.md

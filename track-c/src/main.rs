@@ -22,12 +22,12 @@ fn mmap_file(f: &File) -> std::io::Result<(*mut u8, usize)> {
     if len == 0 {
         return Ok((std::ptr::null_mut(), 0));
     }
-    // PROT_READ = 1, MAP_PRIVATE = 2. Read-only private mapping.
+    // Safety: passing valid fd with PROT_READ (1) and MAP_PRIVATE (2)
     let ptr = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, f.as_raw_fd(), 0) };
     if ptr == !0 as *mut std::ffi::c_void {
         return Err(std::io::Error::last_os_error());
     }
-    // MADV_WILLNEED = 3: trigger asynchronous kernel readahead across entire file
+    // Safety: ptr and len are valid; MADV_WILLNEED = 3 triggers kernel readahead
     unsafe {
         madvise(ptr, len, 3);
     }
@@ -38,23 +38,36 @@ fn mmap_file(_: &File) -> std::io::Result<(*mut u8, usize)> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "unix"))
 }
 
-// Standard pool has ~100k distinct names; 2^17 (131,072) slots fit standard datasets.
-// Fallback constant guards against table saturation if holdout dataset is unusually large.
+// 2^17 (131,072) slots fits ~100k distinct names; fallback handles oversized datasets
 const DEFAULT_INTERN_SIZE: usize = 131072;
 const FALLBACK_INTERN_SIZE: usize = 262144;
 const LARGE_DATASET_THRESHOLD: usize = 300_000_000;
 
-// FNV-1a 64-bit: raw delimited text is a bijection with unescaped field text
+// 8-byte multiply-fold hash: processes 8-byte words using high-entropy multiplier
 #[inline]
 fn hash_name(b: &[u8]) -> u64 {
-    let mut h = 0xcbf29ce484222325u64;
-    for &x in b {
-        h = (h ^ (x as u64)).wrapping_mul(0x100000001b3);
+    let len = b.len();
+    if len == 0 {
+        return 0;
     }
-    h
+    const K: u64 = 0x517cc1b727220a95;
+    let mut h = (len as u64).wrapping_mul(K);
+    let mut i = 0;
+    while i + 8 <= len {
+        // Safety: i + 8 <= len <= b.len(), valid unaligned 8-byte read
+        let val = unsafe { (b.as_ptr().add(i) as *const u64).read_unaligned() };
+        h = (h ^ val).wrapping_mul(K);
+        i += 8;
+    }
+    while i < len {
+        // Safety: i < len <= b.len(), valid byte read
+        h = (h ^ (unsafe { *b.get_unchecked(i) } as u64)).wrapping_mul(K);
+        i += 1;
+    }
+    h ^ (h >> 33)
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 struct CountryAgg {
     count: u64,
     id_sum: u64,
@@ -65,15 +78,17 @@ struct CountryAgg {
     note_bytes: u64,
 }
 impl CountryAgg {
-    const EMPTY: Self = Self {
-        count: 0,
-        id_sum: 0,
-        amount_sum: 0,
-        amount_min: i64::MAX,
-        amount_max: i64::MIN,
-        name_bytes: 0,
-        note_bytes: 0,
-    };
+    const fn new() -> Self {
+        Self {
+            count: 0,
+            id_sum: 0,
+            amount_sum: 0,
+            amount_min: i64::MAX,
+            amount_max: i64::MIN,
+            name_bytes: 0,
+            note_bytes: 0,
+        }
+    }
     #[inline]
     fn add(&mut self, id: u64, cents: i64, nb: u64, tb: u64) {
         self.count += 1;
@@ -83,6 +98,18 @@ impl CountryAgg {
         self.amount_max = self.amount_max.max(cents);
         self.name_bytes += nb;
         self.note_bytes += tb;
+    }
+    #[inline]
+    fn merge(&mut self, o: &Self) {
+        if o.count > 0 {
+            self.count += o.count;
+            self.id_sum += o.id_sum;
+            self.amount_sum += o.amount_sum;
+            self.amount_min = self.amount_min.min(o.amount_min);
+            self.amount_max = self.amount_max.max(o.amount_max);
+            self.name_bytes += o.name_bytes;
+            self.note_bytes += o.note_bytes;
+        }
     }
 }
 
@@ -121,207 +148,26 @@ fn find_first_record_start(bytes: &[u8], data_start: usize, nominal_start: usize
     len
 }
 
-// SWAR digit parsing: branchless multiply trick combines up to 8 decimal digits
+// Fast integer parser: reads decimal digits until delimiter comma
 #[inline(always)]
-unsafe fn parse_digits_8(ptr: *const u8) -> (u64, usize) {
-    // Safety: caller guarantees ptr has at least 8 readable bytes in mapped file
-    let val_le = (ptr as *const u64).read_unaligned();
-    let diff = val_le.wrapping_sub(0x3030303030303030);
-    let non_digit = diff & 0x8080808080808080;
-    let len = if non_digit != 0 {
-        (non_digit.trailing_zeros() / 8) as usize
-    } else {
-        8
-    };
-    if len == 0 {
-        return (0, 0);
-    }
-    let val_be = u64::from_be(val_le);
-    let shift = (8 - len) * 8;
-    let d = (val_be >> shift) & 0x0F0F0F0F0F0F0F0F;
-    let d2 = (d & 0x00FF00FF00FF00FF) + ((d >> 8) & 0x00FF00FF00FF00FF) * 10;
-    let d4 = (d2 & 0x0000FFFF0000FFFF) + ((d2 >> 16) & 0x0000FFFF0000FFFF) * 100;
-    let d8 = (d4 & 0xFFFFFFFF) + (d4 >> 32) * 10000;
-    (d8, len)
-}
-
-// Branchless 64-bit integer parser using SWAR + tzcnt
-#[inline(always)]
-unsafe fn parse_u64_fast(bytes: &[u8], offset: &mut usize) -> u64 {
-    // Safety: caller ensures offset + 8 <= bytes.len()
-    let ptr = bytes.as_ptr().add(*offset);
-    let (num, len) = parse_digits_8(ptr);
-    *offset += len + 1; // skip digits and delimiter comma
-    num
-}
-
-// Branchless amount parser: sign + integer digits + 2 cents digits
-#[inline(always)]
-unsafe fn parse_amount_fast(bytes: &[u8], offset: &mut usize) -> i64 {
-    // Safety: caller ensures offset + 16 <= bytes.len()
-    let b = *bytes.get_unchecked(*offset);
-    let neg = b == b'-';
-    if neg {
-        *offset += 1;
-    }
-    let ptr = bytes.as_ptr().add(*offset);
-    let (int_part, len) = parse_digits_8(ptr);
-    *offset += len + 1; // skip digits and '.'
-    let d1 = (*bytes.get_unchecked(*offset) - b'0') as i64;
-    let d2 = (*bytes.get_unchecked(*offset + 1) - b'0') as i64;
-    *offset += 2;
-    let cents = (int_part as i64) * 100 + (d1 * 10 + d2);
-    if neg {
-        -cents
-    } else {
-        cents
-    }
-}
-
-// AVX2 field scanner: loads 32-byte chunks, searches for quotes or delimiters
-#[target_feature(enable = "avx2")]
-#[inline]
-unsafe fn scan_field_avx2<const HASH: bool>(bytes: &[u8], offset: &mut usize) -> (usize, u64) {
-    // Safety: caller ensures offset is within bounds and vector loads are guarded
-    let b0 = *bytes.get_unchecked(*offset);
-    if b0 == b'"' {
-        *offset += 1;
-        let start = *offset;
-        let mut curr = *offset;
-        let quote_vec = _mm256_set1_epi8(b'"' as i8);
-
-        while curr + 32 <= bytes.len() {
-            // Safety: curr + 32 <= bytes.len() guarantees aligned or unaligned 32-byte read
-            let chunk = _mm256_loadu_si256(bytes.as_ptr().add(curr) as *const __m256i);
-            let eq = _mm256_cmpeq_epi8(chunk, quote_vec);
-            let mask = _mm256_movemask_epi8(eq) as u32;
-            if mask != 0 {
-                let k = mask.trailing_zeros() as usize;
-                // Fast path: single quote in this 32-byte block and not at the chunk boundary
-                if mask.count_ones() == 1 && k < 31 {
-                    let raw_end = curr + k;
-                    let raw = bytes.get_unchecked(start..raw_end);
-                    let h = if HASH { hash_name(raw) } else { 0 };
-                    *offset = raw_end + 2; // skip closing quote and delimiter comma
-                    return (raw.len(), h);
-                }
-                break;
-            }
-            curr += 32;
-        }
-
-        // Scalar slow path for escaped quotes or block boundary crossings
-        let mut idx = curr;
-        let mut pairs = 0;
-        loop {
-            let b = *bytes.get_unchecked(idx);
-            if b == b'"' {
-                if idx + 1 < bytes.len() && *bytes.get_unchecked(idx + 1) == b'"' {
-                    pairs += 1;
-                    idx += 2;
-                } else {
-                    let raw = bytes.get_unchecked(start..idx);
-                    let h = if HASH { hash_name(raw) } else { 0 };
-                    *offset = idx + 2; // skip quote and comma
-                    return (raw.len() - pairs, h);
-                }
-            } else {
-                idx += 1;
-            }
-        }
-    } else {
-        // Unquoted field: search for delimiter (comma, CR, or LF)
-        let start = *offset;
-        let mut curr = *offset;
-        let comma_vec = _mm256_set1_epi8(b',' as i8);
-        let cr_vec = _mm256_set1_epi8(b'\r' as i8);
-        let lf_vec = _mm256_set1_epi8(b'\n' as i8);
-
-        while curr + 32 <= bytes.len() {
-            // Safety: curr + 32 <= bytes.len() guarantees readable 32-byte chunk
-            let chunk = _mm256_loadu_si256(bytes.as_ptr().add(curr) as *const __m256i);
-            let eq_c = _mm256_cmpeq_epi8(chunk, comma_vec);
-            let eq_r = _mm256_cmpeq_epi8(chunk, cr_vec);
-            let eq_l = _mm256_cmpeq_epi8(chunk, lf_vec);
-            let any_delim = _mm256_or_si256(eq_c, _mm256_or_si256(eq_r, eq_l));
-            let mask = _mm256_movemask_epi8(any_delim) as u32;
-            if mask != 0 {
-                let k = mask.trailing_zeros() as usize;
-                let raw = bytes.get_unchecked(start..curr + k);
-                let h = if HASH { hash_name(raw) } else { 0 };
-                *offset = curr + k + 1; // skip delimiter
-                return (raw.len(), h);
-            }
-            curr += 32;
-        }
-
-        let mut idx = curr;
-        while idx < bytes.len() {
-            let b = *bytes.get_unchecked(idx);
-            if b == b',' || b == b'\r' || b == b'\n' {
-                break;
-            }
-            idx += 1;
-        }
-        let raw = bytes.get_unchecked(start..idx);
-        let h = if HASH { hash_name(raw) } else { 0 };
-        *offset = idx + 1;
-        (raw.len(), h)
-    }
-}
-
-// Scans quoted or unquoted field; unescaped length is raw content minus escaped quotes / 2.
-// Safety: chunk boundaries ensure offset stays strictly within mapped CSV records.
-#[inline]
-fn scan_field(bytes: &[u8], offset: &mut usize, hash: bool) -> (usize, u64) {
-    if unsafe { *bytes.get_unchecked(*offset) } == b'"' {
-        *offset += 1;
-        let (start, mut quotes) = (*offset, 0);
-        loop {
-            let b = unsafe { *bytes.get_unchecked(*offset) };
-            if b == b'"' {
-                if unsafe { *bytes.get_unchecked(*offset + 1) } == b'"' {
-                    quotes += 2;
-                    *offset += 2;
-                } else {
-                    let raw = &bytes[start..*offset];
-                    let h = if hash { hash_name(raw) } else { 0 };
-                    *offset += 2; // skip quote and comma
-                    return (raw.len() - quotes / 2, h);
-                }
-            } else {
-                *offset += 1;
-            }
-        }
-    } else {
-        let start = *offset;
-        while unsafe { *bytes.get_unchecked(*offset) } != b',' {
-            *offset += 1;
-        }
-        let raw = &bytes[start..*offset];
-        let h = if hash { hash_name(raw) } else { 0 };
-        *offset += 1;
-        (raw.len(), h)
-    }
-}
-
-#[inline]
-fn parse_u64(bytes: &[u8], offset: &mut usize) -> u64 {
+unsafe fn parse_u64(bytes: &[u8], offset: &mut usize) -> u64 {
     let mut v = 0u64;
     loop {
-        let b = unsafe { *bytes.get_unchecked(*offset) };
+        // Safety: caller ensures offset is within mapped buffer
+        let b = *bytes.get_unchecked(*offset);
+        *offset += 1;
         if b == b',' {
-            *offset += 1;
             return v;
         }
         v = v * 10 + (b - b'0') as u64;
-        *offset += 1;
     }
 }
 
-#[inline]
-fn parse_amount(bytes: &[u8], offset: &mut usize) -> i64 {
-    let neg = if unsafe { *bytes.get_unchecked(*offset) } == b'-' {
+// Fast amount parser: parses signed decimal amount directly into integer cents
+#[inline(always)]
+unsafe fn parse_amount(bytes: &[u8], offset: &mut usize) -> i64 {
+    // Safety: caller ensures offset is within mapped buffer
+    let neg = if *bytes.get_unchecked(*offset) == b'-' {
         *offset += 1;
         true
     } else {
@@ -329,22 +175,95 @@ fn parse_amount(bytes: &[u8], offset: &mut usize) -> i64 {
     };
     let mut d = 0i64;
     loop {
-        let b = unsafe { *bytes.get_unchecked(*offset) };
+        // Safety: caller ensures offset is within mapped buffer
+        let b = *bytes.get_unchecked(*offset);
+        *offset += 1;
         if b == b'.' {
-            *offset += 1;
             break;
         }
         d = d * 10 + (b - b'0') as i64;
-        *offset += 1;
     }
-    let d1 = (unsafe { *bytes.get_unchecked(*offset) } - b'0') as i64;
-    let d2 = (unsafe { *bytes.get_unchecked(*offset + 1) } - b'0') as i64;
+    // Safety: two fractional decimal digits always follow the decimal point
+    let d1 = (*bytes.get_unchecked(*offset) - b'0') as i64;
+    let d2 = (*bytes.get_unchecked(*offset + 1) - b'0') as i64;
     *offset += 2;
-    let c = d * 100 + d1 * 10 + d2;
+    let cents = d * 100 + d1 * 10 + d2;
     if neg {
-        -c
+        -cents
     } else {
-        c
+        cents
+    }
+}
+
+// AVX2 accelerated field scanner with scalar boundary fallback
+#[inline(always)]
+unsafe fn scan_field<const HASH: bool>(bytes: &[u8], offset: &mut usize) -> (usize, u64) {
+    // Safety: caller guarantees offset is within mapped CSV record bounds
+    if *bytes.get_unchecked(*offset) == b'"' {
+        *offset += 1;
+        let start = *offset;
+        let mut curr = *offset;
+        let quote_vec = _mm256_set1_epi8(b'"' as i8);
+        while curr + 32 <= bytes.len() {
+            // Safety: curr + 32 <= bytes.len() ensures readable 32-byte chunk
+            let chunk = _mm256_loadu_si256(bytes.as_ptr().add(curr) as *const __m256i);
+            let mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, quote_vec)) as u32;
+            if mask != 0 {
+                let k = mask.trailing_zeros() as usize;
+                if mask.count_ones() == 1 && k < 31 {
+                    // Safety: slice within mapped bounds
+                    let raw = bytes.get_unchecked(start..curr + k);
+                    *offset = curr + k + 2; // skip closing quote and delimiter comma
+                    return (raw.len(), if HASH { hash_name(raw) } else { 0 });
+                }
+                break;
+            }
+            curr += 32;
+        }
+        // Fallback for escaped quotes or chunk boundary
+        let (mut idx, mut pairs) = (curr, 0);
+        loop {
+            // Safety: CSV syntax ensures matching closing quote
+            let b = *bytes.get_unchecked(idx);
+            if b == b'"' {
+                if idx + 1 < bytes.len() && *bytes.get_unchecked(idx + 1) == b'"' {
+                    pairs += 1;
+                    idx += 2;
+                } else {
+                    // Safety: slice within mapped bounds
+                    let raw = bytes.get_unchecked(start..idx);
+                    *offset = idx + 2;
+                    return (raw.len() - pairs, if HASH { hash_name(raw) } else { 0 });
+                }
+            } else {
+                idx += 1;
+            }
+        }
+    } else {
+        let start = *offset;
+        let mut curr = *offset;
+        let comma_vec = _mm256_set1_epi8(b',' as i8);
+        while curr + 32 <= bytes.len() {
+            // Safety: curr + 32 <= bytes.len() ensures readable 32-byte chunk
+            let chunk = _mm256_loadu_si256(bytes.as_ptr().add(curr) as *const __m256i);
+            let mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, comma_vec)) as u32;
+            if mask != 0 {
+                let k = mask.trailing_zeros() as usize;
+                // Safety: slice within mapped bounds
+                let raw = bytes.get_unchecked(start..curr + k);
+                *offset = curr + k + 1; // skip delimiter
+                return (raw.len(), if HASH { hash_name(raw) } else { 0 });
+            }
+            curr += 32;
+        }
+        let mut idx = curr;
+        while *bytes.get_unchecked(idx) != b',' {
+            idx += 1;
+        }
+        // Safety: slice within mapped bounds
+        let raw = bytes.get_unchecked(start..idx);
+        *offset = idx + 1;
+        (raw.len(), if HASH { hash_name(raw) } else { 0 })
     }
 }
 
@@ -381,11 +300,10 @@ fn mark_name(
     };
     // Guard against writing out of bounds into the bit matrix
     if (name_id >> 6) < words_per_country {
-        let word_idx = c_idx * words_per_country + (name_id >> 6);
-        let bit_mask = 1u64 << (name_id & 63);
-        let word = &matrix[word_idx];
-        if (word.load(Ordering::Relaxed) & bit_mask) == 0 {
-            word.fetch_or(bit_mask, Ordering::Relaxed);
+        let word = &matrix[c_idx * words_per_country + (name_id >> 6)];
+        let bit = 1u64 << (name_id & 63);
+        if (word.load(Ordering::Relaxed) & bit) == 0 {
+            word.fetch_or(bit, Ordering::Relaxed);
         }
     }
 }
@@ -410,7 +328,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             r_idx += 1;
             continue;
         }
-        let rid = parse_u64(&reg_data, &mut r_idx) as usize;
+        // Safety: parse_u64 reads within reg_data bounds
+        let rid = unsafe { parse_u64(&reg_data, &mut r_idx) as usize };
         let (c0, c1, c2) = (reg_data[r_idx], reg_data[r_idx + 1], reg_data[r_idx + 2]);
         let code = ((c0 - b'A') as usize * 26 + (c1 - b'A') as usize) * 26 + (c2 - b'A') as usize;
         let cid = if country_lut[code] == 255 {
@@ -425,7 +344,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             region_to_country.resize((rid + 1).max(region_to_country.len() * 2), 255);
         }
         region_to_country[rid] = cid;
-        r_idx += 3;
         while r_idx < reg_data.len() && reg_data[r_idx] != b'\n' {
             r_idx += 1;
         }
@@ -440,6 +358,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Mmap records.csv
     let rec_file = File::open(format!("{}/records.csv", data_dir))?;
     let (ptr, file_len) = mmap_file(&rec_file)?;
+    // Safety: ptr and file_len are valid from successful mmap
     let bytes = unsafe { std::slice::from_raw_parts(ptr, file_len) };
 
     let mut data_start = if bytes.starts_with(b"\xef\xbb\xbf") {
@@ -492,7 +411,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut handles = Vec::with_capacity(num_threads);
         for _ in 0..num_threads {
             handles.push(s.spawn(|| {
-                let mut local_aggs = vec![CountryAgg::EMPTY; num_countries + 1];
+                let mut local_aggs = vec![CountryAgg::new(); num_countries + 1];
                 loop {
                     let chunk_idx = chunk_cursor.fetch_add(1, Ordering::Relaxed);
                     if chunk_idx >= num_chunks {
@@ -505,22 +424,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if offset + 3 <= file_len && &bytes[offset..offset + 3] == b"\xef\xbb\xbf" {
                             offset += 3;
                         }
-                        // Safety: use fast AVX2 + branchless path only while offset + 64 <= end
-                        let (rec_id, (nb, nh), (tb, _), rid, cents) = if offset + 64 <= end {
-                            unsafe {
-                                (
-                                    parse_u64_fast(bytes, &mut offset),
-                                    scan_field_avx2::<true>(bytes, &mut offset),
-                                    scan_field_avx2::<false>(bytes, &mut offset),
-                                    parse_u64_fast(bytes, &mut offset) as usize,
-                                    parse_amount_fast(bytes, &mut offset),
-                                )
-                            }
-                        } else {
+                        // Safety: offset is within mapped file and fields adhere to CSV spec
+                        let (rec_id, (nb, nh), (tb, _), rid, cents) = unsafe {
                             (
                                 parse_u64(bytes, &mut offset),
-                                scan_field(bytes, &mut offset, true),
-                                scan_field(bytes, &mut offset, false),
+                                scan_field::<true>(bytes, &mut offset),
+                                scan_field::<false>(bytes, &mut offset),
                                 parse_u64(bytes, &mut offset) as usize,
                                 parse_amount(bytes, &mut offset),
                             )
@@ -550,18 +459,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // 4. Merge thread accumulators
-    let mut final_aggs = vec![CountryAgg::EMPTY; num_countries + 1];
+    let mut final_aggs = vec![CountryAgg::new(); num_countries + 1];
     for local in &thread_aggs {
         for (f, l) in final_aggs.iter_mut().zip(local) {
-            if l.count > 0 {
-                f.count += l.count;
-                f.id_sum += l.id_sum;
-                f.amount_sum += l.amount_sum;
-                f.amount_min = f.amount_min.min(l.amount_min);
-                f.amount_max = f.amount_max.max(l.amount_max);
-                f.name_bytes += l.name_bytes;
-                f.note_bytes += l.note_bytes;
-            }
+            f.merge(l);
         }
     }
 
@@ -569,18 +470,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sorted_indices: Vec<usize> = (0..num_countries).collect();
     sorted_indices.sort_unstable_by_key(|&i| countries[i]);
 
-    let mut emit_order: Vec<(&str, usize)> = sorted_indices
-        .into_iter()
-        .map(|i| (std::str::from_utf8(&countries[i]).unwrap(), i))
-        .collect();
-    emit_order.push(("_UNMATCHED", unmatched_idx as usize));
-
     let mut out = BufWriter::new(File::create(format!("{}/aggregates.txt", out_dir))?);
-    for (name, idx) in emit_order {
+    for idx in sorted_indices
+        .into_iter()
+        .chain(std::iter::once(unmatched_idx as usize))
+    {
         let a = &final_aggs[idx];
         if a.count == 0 {
             continue;
         }
+        let name = if idx < num_countries {
+            std::str::from_utf8(&countries[idx]).unwrap()
+        } else {
+            "_UNMATCHED"
+        };
         let row_start = idx * words_per_country;
         let names_count: usize = (0..words_per_country)
             .map(|w| {
