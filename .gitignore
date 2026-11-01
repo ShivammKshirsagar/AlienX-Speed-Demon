@@ -55,3 +55,4 @@ pre-push-report.md
 /tools/setup_test_datasets.py
 /tools/bench_single.py
 /tools/gate_raw_output.txt
+/tools/apply_phase2.py

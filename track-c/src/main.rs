@@ -1,3 +1,4 @@
+use core::arch::x86_64::*;
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -118,6 +119,155 @@ fn find_first_record_start(bytes: &[u8], data_start: usize, nominal_start: usize
         cur += 1;
     }
     len
+}
+
+// SWAR digit parsing: branchless multiply trick combines up to 8 decimal digits
+#[inline(always)]
+unsafe fn parse_digits_8(ptr: *const u8) -> (u64, usize) {
+    // Safety: caller guarantees ptr has at least 8 readable bytes in mapped file
+    let val_le = (ptr as *const u64).read_unaligned();
+    let diff = val_le.wrapping_sub(0x3030303030303030);
+    let non_digit = diff & 0x8080808080808080;
+    let len = if non_digit != 0 {
+        (non_digit.trailing_zeros() / 8) as usize
+    } else {
+        8
+    };
+    if len == 0 {
+        return (0, 0);
+    }
+    let val_be = u64::from_be(val_le);
+    let shift = (8 - len) * 8;
+    let d = (val_be >> shift) & 0x0F0F0F0F0F0F0F0F;
+    let d2 = (d & 0x00FF00FF00FF00FF) + ((d >> 8) & 0x00FF00FF00FF00FF) * 10;
+    let d4 = (d2 & 0x0000FFFF0000FFFF) + ((d2 >> 16) & 0x0000FFFF0000FFFF) * 100;
+    let d8 = (d4 & 0xFFFFFFFF) + (d4 >> 32) * 10000;
+    (d8, len)
+}
+
+// Branchless 64-bit integer parser using SWAR + tzcnt
+#[inline(always)]
+unsafe fn parse_u64_fast(bytes: &[u8], offset: &mut usize) -> u64 {
+    // Safety: caller ensures offset + 8 <= bytes.len()
+    let ptr = bytes.as_ptr().add(*offset);
+    let (num, len) = parse_digits_8(ptr);
+    *offset += len + 1; // skip digits and delimiter comma
+    num
+}
+
+// Branchless amount parser: sign + integer digits + 2 cents digits
+#[inline(always)]
+unsafe fn parse_amount_fast(bytes: &[u8], offset: &mut usize) -> i64 {
+    // Safety: caller ensures offset + 16 <= bytes.len()
+    let b = *bytes.get_unchecked(*offset);
+    let neg = b == b'-';
+    if neg {
+        *offset += 1;
+    }
+    let ptr = bytes.as_ptr().add(*offset);
+    let (int_part, len) = parse_digits_8(ptr);
+    *offset += len + 1; // skip digits and '.'
+    let d1 = (*bytes.get_unchecked(*offset) - b'0') as i64;
+    let d2 = (*bytes.get_unchecked(*offset + 1) - b'0') as i64;
+    *offset += 2;
+    let cents = (int_part as i64) * 100 + (d1 * 10 + d2);
+    if neg {
+        -cents
+    } else {
+        cents
+    }
+}
+
+// AVX2 field scanner: loads 32-byte chunks, searches for quotes or delimiters
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn scan_field_avx2<const HASH: bool>(bytes: &[u8], offset: &mut usize) -> (usize, u64) {
+    // Safety: caller ensures offset is within bounds and vector loads are guarded
+    let b0 = *bytes.get_unchecked(*offset);
+    if b0 == b'"' {
+        *offset += 1;
+        let start = *offset;
+        let mut curr = *offset;
+        let quote_vec = _mm256_set1_epi8(b'"' as i8);
+
+        while curr + 32 <= bytes.len() {
+            // Safety: curr + 32 <= bytes.len() guarantees aligned or unaligned 32-byte read
+            let chunk = _mm256_loadu_si256(bytes.as_ptr().add(curr) as *const __m256i);
+            let eq = _mm256_cmpeq_epi8(chunk, quote_vec);
+            let mask = _mm256_movemask_epi8(eq) as u32;
+            if mask != 0 {
+                let k = mask.trailing_zeros() as usize;
+                // Fast path: single quote in this 32-byte block and not at the chunk boundary
+                if mask.count_ones() == 1 && k < 31 {
+                    let raw_end = curr + k;
+                    let raw = bytes.get_unchecked(start..raw_end);
+                    let h = if HASH { hash_name(raw) } else { 0 };
+                    *offset = raw_end + 2; // skip closing quote and delimiter comma
+                    return (raw.len(), h);
+                }
+                break;
+            }
+            curr += 32;
+        }
+
+        // Scalar slow path for escaped quotes or block boundary crossings
+        let mut idx = curr;
+        let mut pairs = 0;
+        loop {
+            let b = *bytes.get_unchecked(idx);
+            if b == b'"' {
+                if idx + 1 < bytes.len() && *bytes.get_unchecked(idx + 1) == b'"' {
+                    pairs += 1;
+                    idx += 2;
+                } else {
+                    let raw = bytes.get_unchecked(start..idx);
+                    let h = if HASH { hash_name(raw) } else { 0 };
+                    *offset = idx + 2; // skip quote and comma
+                    return (raw.len() - pairs, h);
+                }
+            } else {
+                idx += 1;
+            }
+        }
+    } else {
+        // Unquoted field: search for delimiter (comma, CR, or LF)
+        let start = *offset;
+        let mut curr = *offset;
+        let comma_vec = _mm256_set1_epi8(b',' as i8);
+        let cr_vec = _mm256_set1_epi8(b'\r' as i8);
+        let lf_vec = _mm256_set1_epi8(b'\n' as i8);
+
+        while curr + 32 <= bytes.len() {
+            // Safety: curr + 32 <= bytes.len() guarantees readable 32-byte chunk
+            let chunk = _mm256_loadu_si256(bytes.as_ptr().add(curr) as *const __m256i);
+            let eq_c = _mm256_cmpeq_epi8(chunk, comma_vec);
+            let eq_r = _mm256_cmpeq_epi8(chunk, cr_vec);
+            let eq_l = _mm256_cmpeq_epi8(chunk, lf_vec);
+            let any_delim = _mm256_or_si256(eq_c, _mm256_or_si256(eq_r, eq_l));
+            let mask = _mm256_movemask_epi8(any_delim) as u32;
+            if mask != 0 {
+                let k = mask.trailing_zeros() as usize;
+                let raw = bytes.get_unchecked(start..curr + k);
+                let h = if HASH { hash_name(raw) } else { 0 };
+                *offset = curr + k + 1; // skip delimiter
+                return (raw.len(), h);
+            }
+            curr += 32;
+        }
+
+        let mut idx = curr;
+        while idx < bytes.len() {
+            let b = *bytes.get_unchecked(idx);
+            if b == b',' || b == b'\r' || b == b'\n' {
+                break;
+            }
+            idx += 1;
+        }
+        let raw = bytes.get_unchecked(start..idx);
+        let h = if HASH { hash_name(raw) } else { 0 };
+        *offset = idx + 1;
+        (raw.len(), h)
+    }
 }
 
 // Scans quoted or unquoted field; unescaped length is raw content minus escaped quotes / 2.
@@ -355,13 +505,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if offset + 3 <= file_len && &bytes[offset..offset + 3] == b"\xef\xbb\xbf" {
                             offset += 3;
                         }
-                        let (rec_id, (nb, nh), (tb, _), rid, cents) = (
-                            parse_u64(bytes, &mut offset),
-                            scan_field(bytes, &mut offset, true),
-                            scan_field(bytes, &mut offset, false),
-                            parse_u64(bytes, &mut offset) as usize,
-                            parse_amount(bytes, &mut offset),
-                        );
+                        // Safety: use fast AVX2 + branchless path only while offset + 64 <= end
+                        let (rec_id, (nb, nh), (tb, _), rid, cents) = if offset + 64 <= end {
+                            unsafe {
+                                (
+                                    parse_u64_fast(bytes, &mut offset),
+                                    scan_field_avx2::<true>(bytes, &mut offset),
+                                    scan_field_avx2::<false>(bytes, &mut offset),
+                                    parse_u64_fast(bytes, &mut offset) as usize,
+                                    parse_amount_fast(bytes, &mut offset),
+                                )
+                            }
+                        } else {
+                            (
+                                parse_u64(bytes, &mut offset),
+                                scan_field(bytes, &mut offset, true),
+                                scan_field(bytes, &mut offset, false),
+                                parse_u64(bytes, &mut offset) as usize,
+                                parse_amount(bytes, &mut offset),
+                            )
+                        };
                         if offset < file_len && bytes[offset] == b'\r' {
                             offset += 1;
                         }
