@@ -1,7 +1,7 @@
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[cfg(unix)]
 fn mmap_file(f: &File) -> std::io::Result<(*mut u8, usize)> {
@@ -36,69 +36,9 @@ fn mmap_file(f: &File) -> std::io::Result<(*mut u8, usize)> {
 fn mmap_file(_: &File) -> std::io::Result<(*mut u8, usize)> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "unix"))
 }
-// Open-addressing set with Fibonacci hashing for distinct names
-struct HashSet64 {
-    slots: Vec<u64>,
-    mask: usize,
-    count: usize,
-}
-impl HashSet64 {
-    fn with_capacity(cap: usize) -> Self {
-        let cap = cap.next_power_of_two().max(16);
-        Self {
-            slots: vec![0; cap],
-            mask: cap - 1,
-            count: 0,
-        }
-    }
-    #[inline]
-    fn insert(&mut self, val: u64) {
-        let val = if val == 0 { 0xdeadbeef_cafebabe } else { val };
-        let mut idx = (val.wrapping_mul(0x517cc1b727220a95) as usize) & self.mask;
-        loop {
-            let occ = unsafe { *self.slots.get_unchecked(idx) };
-            if occ == val {
-                return;
-            }
-            if occ == 0 {
-                unsafe {
-                    *self.slots.get_unchecked_mut(idx) = val;
-                }
-                self.count += 1;
-                if self.count * 10 >= (self.mask + 1) * 7 {
-                    let mut s = HashSet64::with_capacity(self.slots.len() * 2);
-                    for &v in &self.slots {
-                        if v != 0 {
-                            s.insert(v);
-                        }
-                    }
-                    *self = s;
-                }
-                return;
-            }
-            idx = (idx + 1) & self.mask;
-        }
-    }
-    fn merge(&mut self, o: &HashSet64) {
-        if o.count == 0 {
-            return;
-        }
-        while (self.count + o.count) * 10 >= (self.mask + 1) * 7 {
-            let mut s = HashSet64::with_capacity(self.slots.len() * 2);
-            for &v in &self.slots {
-                if v != 0 {
-                    s.insert(v);
-                }
-            }
-            *self = s;
-        }
-        for &v in &o.slots {
-            if v != 0 {
-                self.insert(v);
-            }
-        }
-    }
-}
+
+const INTERN_SIZE: usize = 262144;
+const WORDS_PER_COUNTRY: usize = INTERN_SIZE / 64; // 4096
 
 // FNV-1a 64: raw delimited text is a bijection with unescaped text
 #[inline]
@@ -118,7 +58,6 @@ struct CountryAgg {
     amount_max: i64,
     name_bytes: u64,
     note_bytes: u64,
-    names: HashSet64,
 }
 impl CountryAgg {
     fn new() -> Self {
@@ -130,11 +69,10 @@ impl CountryAgg {
             amount_max: i64::MIN,
             name_bytes: 0,
             note_bytes: 0,
-            names: HashSet64::with_capacity(128),
         }
     }
     #[inline]
-    fn add(&mut self, id: u64, cents: i64, nb: u64, tb: u64, nh: u64) {
+    fn add(&mut self, id: u64, cents: i64, nb: u64, tb: u64) {
         self.count += 1;
         self.id_sum += id;
         self.amount_sum += cents;
@@ -142,7 +80,6 @@ impl CountryAgg {
         self.amount_max = self.amount_max.max(cents);
         self.name_bytes += nb;
         self.note_bytes += tb;
-        self.names.insert(nh);
     }
     fn merge(&mut self, o: &CountryAgg) {
         self.count += o.count;
@@ -152,7 +89,6 @@ impl CountryAgg {
         self.amount_max = self.amount_max.max(o.amount_max);
         self.name_bytes += o.name_bytes;
         self.note_bytes += o.note_bytes;
-        self.names.merge(&o.names);
     }
 }
 
@@ -361,10 +297,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     boundaries.push(file_len);
 
+    // Shared intern table: maps 64-bit name hash to a unique dense slot index in 0..INTERN_SIZE-1
+    let mut intern_vec = Vec::with_capacity(INTERN_SIZE);
+    for _ in 0..INTERN_SIZE {
+        intern_vec.push(AtomicU64::new(0));
+    }
+    let intern_table = intern_vec.into_boxed_slice();
+
+    // Shared bit matrix: (num_countries + 1) rows, each WORDS_PER_COUNTRY u64 words
+    let total_matrix_words = (num_countries + 1) * WORDS_PER_COUNTRY;
+    let mut matrix_vec = Vec::with_capacity(total_matrix_words);
+    for _ in 0..total_matrix_words {
+        matrix_vec.push(AtomicU64::new(0));
+    }
+    let bit_matrix = matrix_vec.into_boxed_slice();
+
     // 3. Dynamic work-stealing parallel chunk processing
     let chunk_cursor = AtomicUsize::new(0);
     let r2c = &region_to_country;
     let b_ref = &boundaries;
+    let intern_ref = &intern_table;
+    let matrix_ref = &bit_matrix;
+
     let thread_aggs = std::thread::scope(|s| {
         let mut handles = Vec::with_capacity(num_threads);
         for _ in 0..num_threads {
@@ -401,7 +355,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             unmatched_idx as usize
                         };
-                        local_aggs[c_idx].add(rec_id, cents, nb as u64, tb as u64, nh);
+                        local_aggs[c_idx].add(rec_id, cents, nb as u64, tb as u64);
+
+                        // Intern name hash into lock-free table
+                        let hash_val = if nh == 0 { 1 } else { nh };
+                        let mut slot = (hash_val.wrapping_mul(0x517cc1b727220a95) as usize)
+                            & (INTERN_SIZE - 1);
+                        let name_id = loop {
+                            let curr = intern_ref[slot].load(Ordering::Relaxed);
+                            if curr == hash_val {
+                                break slot;
+                            }
+                            if curr == 0 {
+                                match intern_ref[slot].compare_exchange_weak(
+                                    0,
+                                    hash_val,
+                                    Ordering::Relaxed,
+                                    Ordering::Relaxed,
+                                ) {
+                                    Ok(_) => break slot,
+                                    Err(actual) if actual == hash_val => break slot,
+                                    _ => {}
+                                }
+                            }
+                            slot = (slot + 1) & (INTERN_SIZE - 1);
+                        };
+
+                        // Mark name_id in country bit matrix
+                        let word_idx = c_idx * WORDS_PER_COUNTRY + (name_id >> 6);
+                        let bit_mask = 1u64 << (name_id & 63);
+                        let word = &matrix_ref[word_idx];
+                        if (word.load(Ordering::Relaxed) & bit_mask) == 0 {
+                            word.fetch_or(bit_mask, Ordering::Relaxed);
+                        }
                     }
                 }
                 local_aggs
@@ -436,6 +422,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             b"_UNMATCHED"
         };
+
+        // Distinct names count is the population count across this country's bit row
+        let mut names_count = 0usize;
+        let row_start = i * WORDS_PER_COUNTRY;
+        for w in 0..WORDS_PER_COUNTRY {
+            names_count += bit_matrix[row_start + w]
+                .load(Ordering::Relaxed)
+                .count_ones() as usize;
+        }
+
         write!(
             out,
             "{} {} {} ",
@@ -448,7 +444,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         write_cents(&mut out, a.amount_min)?;
         write!(out, " ")?;
         write_cents(&mut out, a.amount_max)?;
-        writeln!(out, " {} {} {}", a.names.count, a.name_bytes, a.note_bytes)?;
+        writeln!(out, " {} {} {}", names_count, a.name_bytes, a.note_bytes)?;
     }
     out.flush()?;
 
