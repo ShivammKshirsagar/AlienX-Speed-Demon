@@ -37,3 +37,15 @@ __pycache__/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Track C tools and reports
+/tools/bench_c.*
+/tools/expected_hashes.txt
+/tools/gen_expected_hashes.py
+/tools/timers.patch
+opt-report.md
+baseline-report.md
+track-c-impl-report.md
+pre-push-report.md
+/tools/verify_gate.py
+/tools/sweep_threads.py

@@ -1,6 +1,7 @@
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(unix)]
 fn mmap_file(f: &File) -> std::io::Result<(*mut u8, usize)> {
@@ -20,10 +21,12 @@ fn mmap_file(f: &File) -> std::io::Result<(*mut u8, usize)> {
     if len == 0 {
         return Ok((std::ptr::null_mut(), 0));
     }
+    // PROT_READ = 1, MAP_SHARED = 1, MAP_PRIVATE = 2. Use MAP_PRIVATE (2) for read-only pages.
     let p = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, f.as_raw_fd(), 0) };
     if p == !0 as *mut std::ffi::c_void {
         return Err(std::io::Error::last_os_error());
     }
+    // MADV_WILLNEED = 3: initiate asynchronous readahead on the whole file
     unsafe {
         madvise(p, len, 3);
     }
@@ -33,18 +36,6 @@ fn mmap_file(f: &File) -> std::io::Result<(*mut u8, usize)> {
 fn mmap_file(_: &File) -> std::io::Result<(*mut u8, usize)> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "unix"))
 }
-#[cfg(unix)]
-fn munmap_file(p: *mut u8, l: usize) {
-    extern "C" {
-        fn munmap(a: *mut std::ffi::c_void, l: usize) -> i32;
-    }
-    if !p.is_null() && l > 0 {
-        unsafe {
-            munmap(p as *mut std::ffi::c_void, l);
-        }
-    }
-}
-
 // Open-addressing set with Fibonacci hashing for distinct names
 struct HashSet64 {
     slots: Vec<u64>,
@@ -273,23 +264,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = args.get(1).map_or("/data", |s| s.as_str());
     let out_dir = args.get(2).map_or("/out", |s| s.as_str());
 
-    // 1. Build flat direct-lookup table from regions.csv
+    // 1. Build flat direct-lookup table from regions.csv via two fast passes
     let reg_data = std::fs::read(format!("{}/regions.csv", data_dir))?;
-    let (mut countries, mut reg_pairs, mut max_rid) = (Vec::new(), Vec::new(), 0usize);
-    let mut r_idx = reg_data
+    let header_end = reg_data
         .iter()
         .position(|&b| b == b'\n')
         .map_or(0, |p| p + 1);
 
+    // Pass 1: compute max_rid and find distinct 3-letter country codes
+    let mut country_lut = [255u8; 17576]; // 26^3 L1 table
+    let mut countries = Vec::with_capacity(256);
+    let mut max_rid = 0usize;
+    let mut r_idx = header_end;
     while r_idx < reg_data.len() {
         if reg_data[r_idx] == b'\r' || reg_data[r_idx] == b'\n' {
             r_idx += 1;
             continue;
         }
         let rid = parse_u64(&reg_data, &mut r_idx) as usize;
-        countries.push([reg_data[r_idx], reg_data[r_idx + 1], reg_data[r_idx + 2]]);
-        reg_pairs.push((rid, *countries.last().unwrap()));
         max_rid = max_rid.max(rid);
+        let (c0, c1, c2) = (reg_data[r_idx], reg_data[r_idx + 1], reg_data[r_idx + 2]);
+        if c0 >= b'A' && c0 <= b'Z' && c1 >= b'A' && c1 <= b'Z' && c2 >= b'A' && c2 <= b'Z' {
+            let code =
+                ((c0 - b'A') as usize * 26 + (c1 - b'A') as usize) * 26 + (c2 - b'A') as usize;
+            if country_lut[code] == 255 {
+                country_lut[code] = 1;
+                countries.push([c0, c1, c2]);
+            }
+        }
         r_idx += 3;
         while r_idx < reg_data.len() && reg_data[r_idx] != b'\n' {
             r_idx += 1;
@@ -300,14 +302,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     countries.sort_unstable();
-    countries.dedup();
     let num_countries = countries.len();
     let unmatched_idx = num_countries as u8;
 
+    // Map each country code to its alphabetical sorted index
+    for (idx, &[c0, c1, c2]) in countries.iter().enumerate() {
+        let code = ((c0 - b'A') as usize * 26 + (c1 - b'A') as usize) * 26 + (c2 - b'A') as usize;
+        country_lut[code] = idx as u8;
+    }
+
+    // Pass 2: fill region_to_country direct lookup array
     let mut region_to_country = vec![unmatched_idx; max_rid + 1];
-    for (rid, c) in reg_pairs {
-        if let Ok(pos) = countries.binary_search(&c) {
-            region_to_country[rid] = pos as u8;
+    r_idx = header_end;
+    while r_idx < reg_data.len() {
+        if reg_data[r_idx] == b'\r' || reg_data[r_idx] == b'\n' {
+            r_idx += 1;
+            continue;
+        }
+        let rid = parse_u64(&reg_data, &mut r_idx) as usize;
+        let (c0, c1, c2) = (reg_data[r_idx], reg_data[r_idx + 1], reg_data[r_idx + 2]);
+        if c0 >= b'A' && c0 <= b'Z' && c1 >= b'A' && c1 <= b'Z' && c2 >= b'A' && c2 <= b'Z' {
+            let code =
+                ((c0 - b'A') as usize * 26 + (c1 - b'A') as usize) * 26 + (c2 - b'A') as usize;
+            region_to_country[rid] = country_lut[code];
+        }
+        r_idx += 3;
+        while r_idx < reg_data.len() && reg_data[r_idx] != b'\n' {
+            r_idx += 1;
+        }
+        if r_idx < reg_data.len() {
+            r_idx += 1;
         }
     }
 
@@ -328,46 +352,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let data_len = file_len - data_start;
     let num_threads = 12.min(data_len.max(1));
+    let num_chunks = 128.min((data_len / 32768).max(1));
 
-    // 3. Parallel chunk processing across 12 threads
+    let mut boundaries = Vec::with_capacity(num_chunks + 1);
+    for c in 0..num_chunks {
+        let nom = data_start + (c * data_len) / num_chunks;
+        boundaries.push(find_first_record_start(bytes, data_start, nom));
+    }
+    boundaries.push(file_len);
+
+    // 3. Dynamic work-stealing parallel chunk processing
+    let chunk_cursor = AtomicUsize::new(0);
+    let r2c = &region_to_country;
+    let b_ref = &boundaries;
     let thread_aggs = std::thread::scope(|s| {
         let mut handles = Vec::with_capacity(num_threads);
-        for t in 0..num_threads {
-            let r2c = &region_to_country;
-            let handle = s.spawn(move || {
-                let nom_start = data_start + (t * data_len) / num_threads;
-                let nom_end = data_start + ((t + 1) * data_len) / num_threads;
-                let mut offset = find_first_record_start(bytes, data_start, nom_start);
+        for _ in 0..num_threads {
+            handles.push(s.spawn(|| {
                 let mut local_aggs: Vec<CountryAgg> =
                     (0..=num_countries).map(|_| CountryAgg::new()).collect();
+                loop {
+                    let chunk_idx = chunk_cursor.fetch_add(1, Ordering::Relaxed);
+                    if chunk_idx >= num_chunks {
+                        break;
+                    }
+                    let mut offset = b_ref[chunk_idx];
+                    let end = b_ref[chunk_idx + 1];
 
-                while offset < nom_end && offset < file_len {
-                    if offset + 3 <= file_len && &bytes[offset..offset + 3] == b"\xef\xbb\xbf" {
-                        offset += 3;
+                    while offset < end {
+                        if offset + 3 <= file_len && &bytes[offset..offset + 3] == b"\xef\xbb\xbf" {
+                            offset += 3;
+                        }
+                        let (rec_id, (nb, nh), (tb, _), rid, cents) = (
+                            parse_u64(bytes, &mut offset),
+                            scan_field(bytes, &mut offset),
+                            scan_field(bytes, &mut offset),
+                            parse_u64(bytes, &mut offset) as usize,
+                            parse_amount(bytes, &mut offset),
+                        );
+                        if offset < file_len && bytes[offset] == b'\r' {
+                            offset += 1;
+                        }
+                        if offset < file_len && bytes[offset] == b'\n' {
+                            offset += 1;
+                        }
+                        let c_idx = if rid < r2c.len() {
+                            r2c[rid] as usize
+                        } else {
+                            unmatched_idx as usize
+                        };
+                        local_aggs[c_idx].add(rec_id, cents, nb as u64, tb as u64, nh);
                     }
-                    let (rec_id, (nb, nh), (tb, _), rid, cents) = (
-                        parse_u64(bytes, &mut offset),
-                        scan_field(bytes, &mut offset),
-                        scan_field(bytes, &mut offset),
-                        parse_u64(bytes, &mut offset) as usize,
-                        parse_amount(bytes, &mut offset),
-                    );
-                    if offset < file_len && bytes[offset] == b'\r' {
-                        offset += 1;
-                    }
-                    if offset < file_len && bytes[offset] == b'\n' {
-                        offset += 1;
-                    }
-                    let c_idx = if rid < r2c.len() {
-                        r2c[rid] as usize
-                    } else {
-                        unmatched_idx as usize
-                    };
-                    local_aggs[c_idx].add(rec_id, cents, nb as u64, tb as u64, nh);
                 }
                 local_aggs
-            });
-            handles.push(handle);
+            }));
         }
         handles
             .into_iter()
@@ -414,8 +452,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     out.flush()?;
 
-    #[cfg(unix)]
-    munmap_file(ptr, file_len);
-
-    Ok(())
+    // Exit immediately to avoid deallocation and unmapping overhead
+    std::process::exit(0);
 }
