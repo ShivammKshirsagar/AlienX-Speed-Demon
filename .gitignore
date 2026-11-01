@@ -1,6 +1,7 @@
 .out/
 out/
 data/
+tools/speed-demon-2026/
 
 # Rust build artifacts.
 /track-a/target/
