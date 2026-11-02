@@ -5,60 +5,64 @@ use std::path::Path;
 use std::thread;
 
 const HOURS: usize = 72;
-const MAX_THREADS: usize = 7;
+const MAX_THREADS: usize = 9;
 const POST_PARSE_THREADS: usize = 5;
 const INITIAL_ECAP: usize = 2048;
 
+// A small, deterministic hasher is enough here: endpoint keys are short ASCII strings.
 #[derive(Default)]
 struct FastHasher(u64);
 
+#[cfg(not(target_arch = "x86_64"))]
+compile_error!("the pinned x86-64-v3 build requires x86_64");
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.2")]
+unsafe fn crc32c_update(mut crc: u32, bytes: &[u8]) -> u32 {
+    use std::arch::x86_64::{_mm_crc32_u64, _mm_crc32_u8};
+    if bytes.len() == 1 {
+        return _mm_crc32_u8(crc, bytes[0]);
+    }
+    let mut chunks = bytes.chunks_exact(8);
+    for chunk in &mut chunks {
+        let word = u64::from_ne_bytes(chunk.try_into().unwrap());
+        crc = _mm_crc32_u64(u64::from(crc), word) as u32;
+    }
+    for &byte in chunks.remainder() {
+        crc = _mm_crc32_u8(crc, byte);
+    }
+    crc
+}
+
 impl Hasher for FastHasher {
     fn write(&mut self, bytes: &[u8]) {
-        self.0 = endpoint_hash(bytes);
+        #[cfg(target_arch = "x86_64")]
+        let h = {
+            // SAFETY: the shipped Docker build targets x86-64-v3, which includes SSE4.2.
+            unsafe { crc32c_update(self.0 as u32, bytes) }
+        };
+        self.0 = u64::from(h) ^ (bytes.len() as u64).rotate_left(17);
     }
 
-    fn write_u64(&mut self, value: u64) {
-        self.0 = value;
-    }
     fn finish(&self) -> u64 {
-        self.0
+        let mut h = (self.0 ^ (self.0 >> 32)) as u32;
+        h ^= h >> 16;
+        h = h.wrapping_mul(0x7feb352d);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x846ca68b);
+        h ^= h >> 16;
+        u64::from(h) * 0x0000000100000001
     }
 }
 
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
 
-struct Endpoint<'a>(&'a [u8], u64);
-fn endpoint_hash(bytes: &[u8]) -> u64 {
-    let first = if bytes.len() >= 8 {
-        u64::from_ne_bytes(bytes[..8].try_into().unwrap())
-    } else {
-        bytes
-            .iter()
-            .enumerate()
-            .fold(0, |x, (i, &b)| x | (u64::from(b) << (i * 8)))
-    };
-    let last = if bytes.len() >= 8 {
-        u64::from_ne_bytes(bytes[bytes.len() - 8..].try_into().unwrap())
-    } else {
-        first
-    };
-    let mut h =
-        first ^ last.rotate_left(23) ^ (bytes.len() as u64).wrapping_mul(0x9e3779b185ebca87);
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xff51afd7ed558ccd);
-    h ^ (h >> 33)
-}
+#[derive(PartialEq, Eq)]
+struct Endpoint<'a>(&'a [u8]);
 
-impl PartialEq for Endpoint<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl Eq for Endpoint<'_> {}
 impl Hash for Endpoint<'_> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_u64(self.1);
+        state.write(self.0);
     }
 }
 
@@ -94,8 +98,8 @@ struct Local<'a> {
 impl<'a> Local<'a> {
     fn new() -> Self {
         Self {
-            endpoints: Vec::with_capacity(6144),
-            endpoint_ids: FastMap::with_capacity_and_hasher(512, BuildHasherDefault::default()),
+            endpoints: Vec::new(),
+            endpoint_ids: FastMap::default(),
             ecap: INITIAL_ECAP,
             group_ids: vec![u32::MAX; HOURS * INITIAL_ECAP],
             group_keys: Vec::new(),
@@ -137,10 +141,7 @@ impl<'a> Local<'a> {
         if id == self.ecap {
             self.grow_ecap();
         }
-        match self
-            .endpoint_ids
-            .entry(Endpoint(bytes, endpoint_hash(bytes)))
-        {
+        match self.endpoint_ids.entry(Endpoint(bytes)) {
             Entry::Occupied(entry) => *entry.get(),
             Entry::Vacant(entry) => {
                 entry.insert(id);
@@ -190,6 +191,8 @@ unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
     while p + 32 <= line.len() {
         // SAFETY: the loop condition guarantees a full readable vector.
         let chunk = unsafe { _mm256_loadu_si256(line.as_ptr().add(p).cast()) };
+        let spaces =
+            _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b' ' as i8))) as u32;
         let newlines =
             _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'\n' as i8))) as u32;
         let stop = if newlines == 0 {
@@ -197,24 +200,20 @@ unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
         } else {
             newlines.trailing_zeros() as usize
         };
-        if found < 2 {
-            let spaces =
-                _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b' ' as i8))) as u32;
-            let mut mask = spaces
-                & if stop == 32 {
-                    u32::MAX
-                } else {
-                    (1 << stop) - 1
-                };
-            if mask != 0 && found == 0 {
-                first = p + mask.trailing_zeros() as usize;
-                found = 1;
-                mask &= mask - 1;
-            }
-            if mask != 0 && found == 1 {
-                second = p + mask.trailing_zeros() as usize;
-                found = 2;
-            }
+        let mut mask = spaces
+            & if stop == 32 {
+                u32::MAX
+            } else {
+                (1 << stop) - 1
+            };
+        if mask != 0 && found == 0 {
+            first = p + mask.trailing_zeros() as usize;
+            found = 1;
+            mask &= mask - 1;
+        }
+        if mask != 0 && found == 1 {
+            second = p + mask.trailing_zeros() as usize;
+            found = 2;
         }
         if newlines != 0 {
             return (p + stop, first, second);
@@ -296,14 +295,11 @@ impl Mapping {
                 fd: i32,
                 offset: isize,
             ) -> *mut std::ffi::c_void;
-            fn madvise(addr: *mut std::ffi::c_void, length: usize, advice: i32) -> i32;
         }
         // SAFETY: the read-only mapping remains valid after the descriptor closes, and the
         // returned pointer is checked against MAP_FAILED before it is accessed.
         let ptr = unsafe { mmap(std::ptr::null_mut(), len, 1, 2, file.as_raw_fd(), 0) };
         assert_ne!(ptr as isize, -1, "mmap input");
-        // SAFETY: ptr and len are the live read-only mapping; MADV_HUGEPAGE is only a best-effort hint.
-        let _ = unsafe { madvise(ptr, len, 14) };
         Self {
             ptr: ptr.cast(),
             len,
@@ -365,28 +361,15 @@ fn push_uint(out: &mut Vec<u8>, mut n: u64) {
     out.extend_from_slice(&digits[at..]);
 }
 
-fn push_uint32(out: &mut Vec<u8>, mut n: u32) {
-    let mut digits = [0u8; 10];
-    let mut at = digits.len();
-    loop {
-        at -= 1;
-        digits[at] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    out.extend_from_slice(&digits[at..]);
-}
-
 fn format_hours(
     range: std::ops::Range<usize>,
+    capacity: usize,
     order: &[usize],
     endpoints: &[&[u8]],
     groups: &[Group],
     hours: &[[u8; 20]],
-    out: &mut Vec<u8>,
-) {
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(capacity);
     for hour in range {
         for &endpoint in order {
             let group = &groups[hour * endpoints.len() + endpoint];
@@ -398,20 +381,21 @@ fn format_hours(
             out.extend_from_slice(endpoints[endpoint]);
             out.push(b' ');
             let count = group.latencies.len() as u64;
-            push_uint(out, count);
+            push_uint(&mut out, count);
             out.push(b' ');
-            push_uint32(out, group.p50);
+            push_uint(&mut out, u64::from(group.p50));
             out.push(b' ');
-            push_uint32(out, group.p95);
+            push_uint(&mut out, u64::from(group.p95));
             out.push(b' ');
-            push_uint32(out, group.p99);
+            push_uint(&mut out, u64::from(group.p99));
             out.push(b' ');
-            push_uint32(out, group.errors);
+            push_uint(&mut out, u64::from(group.errors));
             out.push(b' ');
-            push_uint32(out, (u64::from(group.errors) * 1_000_000 / count) as u32);
+            push_uint(&mut out, u64::from(group.errors) * 1_000_000 / count);
             out.push(b'\n');
         }
     }
+    out
 }
 
 fn main() {
@@ -452,7 +436,7 @@ fn main() {
     });
 
     let workers = workers.min(POST_PARSE_THREADS);
-    let mut global_ids: HashMap<&[u8], usize> = HashMap::new();
+    let mut global_ids: FastMap<&[u8], usize> = FastMap::default();
     let mut endpoints: Vec<&[u8]> = Vec::new();
     let mut remaps = Vec::with_capacity(locals.len());
     for local in &mut locals {
@@ -566,6 +550,36 @@ fn main() {
             }
         }
     }
+    let target_size = hour_sizes.iter().sum::<usize>().div_ceil(workers);
+    let mut ranges = Vec::with_capacity(workers);
+    let (mut start, mut size) = (0, 0);
+    for (hour, &weight) in hour_sizes.iter().enumerate() {
+        size += weight;
+        if size >= target_size && ranges.len() + 1 < workers {
+            ranges.push((start..hour + 1, size));
+            start = hour + 1;
+            size = 0;
+        }
+    }
+    if start < HOURS || ranges.is_empty() {
+        ranges.push((start..HOURS, size));
+    }
+    let output_buffers = thread::scope(|scope| {
+        let joins = ranges
+            .into_iter()
+            .map(|(range, capacity)| {
+                let order = &order;
+                let endpoints = &endpoints;
+                let groups = &groups;
+                let hours = &hours;
+                scope.spawn(move || format_hours(range, capacity, order, endpoints, groups, hours))
+            })
+            .collect::<Vec<_>>();
+        joins
+            .into_iter()
+            .map(|join| join.join().expect("format worker panicked"))
+            .collect::<Vec<_>>()
+    });
     if let Some(parent) = Path::new(&output).parent() {
         std::fs::create_dir_all(parent).expect("create output directory");
     }
@@ -576,18 +590,8 @@ fn main() {
         .open(output)
         .expect("open output");
     use std::io::Write;
-    let mut buffer = Vec::with_capacity(hour_sizes.iter().copied().max().unwrap_or(0));
-    for hour in 0..HOURS {
-        buffer.clear();
-        format_hours(
-            hour..hour + 1,
-            &order,
-            &endpoints,
-            &groups,
-            &hours,
-            &mut buffer,
-        );
-        file.write_all(&buffer).expect("write output hour");
+    for buffer in output_buffers {
+        file.write_all(&buffer).expect("write output range");
     }
     drop(mapping);
     std::process::exit(0);

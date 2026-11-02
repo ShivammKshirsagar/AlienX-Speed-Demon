@@ -420,3 +420,9 @@ H164 scored 65.398 points on run `run-0e251929474d`, below the author-reported b
 | v8 | v7 plus v5 percentile selection | run-40f20faa186c | ce593ff82c0ef4852183836fa5bf1830d200a521 | T=0.063016 s / M=47,259,648 B / S=541 / K=21.983725 | Rejected; 67.105065 pts, below v7 |
 | c3 | Shared-mapped output with positioned-write fallback | RUN-ID-TBD | COMMIT-TBD | Points 62.596; T/M/S/K not supplied | Rejected; below v7 67.289 |
 | H142 | Compact group index, 7 parse/5 post workers, huge-page hint | RUN-ID-TBD | 6dec450 | TBD | Locally committed; push/board run pending |
+
+## Board update: H142 and H83
+
+H142 was pushed as commit `1e0632050363f93262caef45d42b84f1b04c56a8` and scored 64.679018 points. The board reported T=0.0848 s, M=38,584,320 B, S=555, K=19.659857 (run `run-dc3e534c6b5b`). This is below the v7 best of 67.289394, so H142 is rejected. The active source is now H83, restored from `tools/track-a/work/h83-nine-parse-five-post/src/main.rs`; it uses 9 parse workers, 5 later-phase workers, and CRC32C hash plus avalanche. Its S is 558. It has passed the saved local full-hash, sample and fixture checks; no board score is claimed yet.
+
+| H83 | 9 parse/5 post workers; CRC32C plus avalanche | RUN-ID-TBD | COMMIT-TBD | TBD | Current board candidate; local checks recorded in candidate archive |
