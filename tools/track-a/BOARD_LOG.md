@@ -32,4 +32,6 @@ Do not fill run IDs or board metrics from local measurements. v7 (parser plus ex
 
 | H179 fast integer output | 04c3fa8776c2265fb4c915876dbd4d6449c87fcb | run-018d7b51d241 | 0.063230 s | 47,517,696 B | 544 | 21.904427 | 67.026595 points; correctness passed, rejected below v7 |
 
-| H180 two-block AVX2 scan | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | One scanner change atop v7; board result pending |
+| H180 two-block AVX2 scan | 47f85506c59f97544112929f55000ce39c275ff6 | run-c09af698dc5c | Build failed | — | — | — | Scanner transplant omitted `parse_uint_swar`; board build error identified it. |
+
+| H181 corrected two-block AVX2 scan | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Restored helper; official local Docker check passed full seed-1 hash; board result pending |

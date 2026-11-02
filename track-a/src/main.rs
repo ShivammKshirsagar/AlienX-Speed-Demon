@@ -156,6 +156,19 @@ unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
     (line.len(), first, second)
 }
 
+fn parse_uint_swar(bytes: &[u8]) -> u32 {
+    if bytes.len() != 8 {
+        return parse_uint(bytes);
+    }
+    // SAFETY: exactly eight token bytes are readable; converting from LE fixes byte order.
+    let word = u64::from_le(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast()) });
+    let mut value = 0u32;
+    for shift in 0..8 {
+        value = value * 10 + ((word >> (shift * 8)) as u8 - b'0') as u32;
+    }
+    value
+}
+
 fn parse_range<'a>(data: &'a [u8], start: usize, end: usize) -> Local<'a> {
     let mut local = Local::new();
     let mut pos = start;
