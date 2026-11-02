@@ -428,3 +428,5 @@ H142 was pushed as commit `1e0632050363f93262caef45d42b84f1b04c56a8` and scored 
 | H83 | 9 parse/5 post workers; CRC32C plus avalanche | run-95ac2b92059b | 74c7df4534f2fa8b86367c9f884f5d6b70605c67 | T=0.082354 s / M=43,110,400 B / S=558 / K=19.496224 / 64.497525 pts | Rejected; all board gates passed, but below v7 |
 
 H83 completed successfully on the board (run `run-95ac2b92059b`): T=0.082354 s, M=43,110,400 B, S=558, K=19.496224, 64.497525 points. Restored v7 as the best-known source, SHA256 `2FD6CA6CFA5551C735C3A2D2D812D767D1334FA60570302F480D2E157960AE17`, S=526. The current best remains 67.289394 points; the 71-point target is unmet.
+
+| H173 | H142 compact groups with 12 parse and 12 later-phase workers | RUN-ID-TBD | COMMIT-TBD | TBD | Pending board run; S=555, source SHA256 `CF8B969CA1C6324BB9E5D22E8CFFC5F36F9EBB161B08C7B7916E30FF8B9863A7` |

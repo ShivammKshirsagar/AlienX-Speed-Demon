@@ -15,5 +15,6 @@
 | H142 compact group index (scored) | `1e0632050363f93262caef45d42b84f1b04c56a8` | run-dc3e534c6b5b | 0.0848 s | 38,584,320 B | 555 | 19.659857 | 64.679018 points; rejected below v7 |
 | H83 CRC32C group index | `74c7df4534f2fa8b86367c9f884f5d6b70605c67` | run-95ac2b92059b | 0.082354 s | 43,110,400 B | 558 | 19.496224 | 64.497525 points; rejected below v7, all gates passed |
 | v7 fast parser + exit (restored best) | Source `2FD6CA6CFA5551C735C3A2D2D812D767D1334FA60570302F480D2E157960AE17` | Existing run-eefcfa8a21c2 | 0.062314 s | 47,575,040 B | 526 | 22.171133 | 67.289394 points; best known, restored locally |
+| H173 H142 groups with 12/12 workers | Pending commit | RUN-ID-TBD | TBD | TBD | 555 | TBD | Active board candidate; only worker limits changed from H142; source SHA256 `CF8B969CA1C6324BB9E5D22E8CFFC5F36F9EBB161B08C7B7916E30FF8B9863A7` |
 
 Do not fill run IDs or board metrics from local measurements. v7 (parser plus exit) remains the best known board result at 67.289. Current push candidate is H142, source SHA256 `4770755B0BD792863ED53D54B44D0F07CEE2F62152A2F38A742F55171B66F138`; it passed the recorded local correctness suite but has no board result. Continue using real board results; the active milestone is at least 71 points.
