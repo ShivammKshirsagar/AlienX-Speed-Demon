@@ -19,6 +19,7 @@
 | H173 H142 groups with 12/12 workers | `2b1c989bca2ceb5810c0a6b9424df491da1128ac` | run-388df169828f | 0.072067 s | 39,657,472 B | 555 | 21.209343 | 66.326361 points; rejected below v7 best; all gates passed |
 | H174 H173 with parallel output and `_exit` | Pending commit | RUN-ID-TBD | TBD | TBD | 559 | TBD | Active board candidate; fixed equal-hour output blocks; source SHA256 `C3790BADD24852E879AB513CB6F09720F53E67E7E07FFEF13488DFAA0234AA59` |
 | H174 parallel output | `8c1a1e1e2d1908240e2b2eea5ae9a0b5611f5a57` | run-4dc5f1362b5c | 0.061107 s | 54,181,888 B | 559 | 21.616049 | 66.738816 points; gates passed, rejected below v7 K |
-| H175 streaming parallel writes | Pending commit | RUN-ID-TBD | TBD | TBD | 575 | TBD | Active board candidate; exact hour sizes/offsets and only one output-hour buffer per worker; source SHA256 `1DE674070EF9782588ED669C3A95D7393698A75444B31F99ACDB8A7CE0198AEE` |
+| H175 streaming parallel writes | `25679c4324fa4a301c01cbd584c766d874e7856a` | run-cb0b856f78a8 | 0.076954 s | 41,390,080 B | 575 | 20.242277 | 65.312968 points; passed gates but time regressed; rejected |
+| H176 batched output | Pending commit | RUN-ID-TBD | TBD | TBD | 560 | TBD | Active candidate; two buffer waves, source SHA256 `B25D653C0B11BBBFE575D26C6A5D538DFD26B611408D244B966723FF704D6918` |
 
 Do not fill run IDs or board metrics from local measurements. v7 (parser plus exit) remains the best known board result at 67.289. Current push candidate is H142, source SHA256 `4770755B0BD792863ED53D54B44D0F07CEE2F62152A2F38A742F55171B66F138`; it passed the recorded local correctness suite but has no board result. Continue using real board results; the active milestone is at least 71 points.

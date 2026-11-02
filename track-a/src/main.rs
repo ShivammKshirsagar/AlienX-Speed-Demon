@@ -1,4 +1,5 @@
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::path::Path;
 use std::thread;
@@ -363,34 +364,6 @@ fn push_uint(out: &mut Vec<u8>, mut n: u64) {
     out.extend_from_slice(&digits[at..]);
 }
 
-fn decimal_len(n: u64) -> usize {
-    n.max(1).ilog10() as usize + 1
-}
-
-fn hour_size(hour: usize, order: &[usize], endpoints: &[&[u8]], groups: &[Group]) -> usize {
-    order.iter().fold(0, |size, &endpoint| {
-        let group = &groups[hour * endpoints.len() + endpoint];
-        if group.latencies.is_empty() {
-            size
-        } else {
-            let count = group.latencies.len() as u64;
-            size + endpoints[endpoint].len()
-                + 28
-                + [
-                    count,
-                    u64::from(group.p50),
-                    u64::from(group.p95),
-                    u64::from(group.p99),
-                    u64::from(group.errors),
-                    u64::from(group.errors) * 1_000_000 / count,
-                ]
-                .into_iter()
-                .map(decimal_len)
-                .sum::<usize>()
-        }
-    })
-}
-
 fn format_hours(
     range: std::ops::Range<usize>,
     order: &[usize],
@@ -569,19 +542,11 @@ fn main() {
     let mut order: Vec<usize> = (0..endpoints.len()).collect();
     order.sort_unstable_by(|&a, &b| endpoints[a].cmp(endpoints[b]));
     let hours = hour_strings();
-    let hour_sizes: Vec<_> = (0..HOURS)
-        .map(|hour| hour_size(hour, &order, &endpoints, &groups))
-        .collect();
-    let mut total_size = 0u64;
-    let offsets: Vec<_> = hour_sizes
-        .iter()
-        .map(|&size| {
-            let offset = total_size;
-            total_size += size as u64;
-            offset
-        })
-        .collect();
     let range_size = HOURS.div_ceil(workers);
+    let ranges: Vec<_> = (0..HOURS)
+        .step_by(range_size)
+        .map(|start| start..(start + range_size).min(HOURS))
+        .collect();
     if let Some(parent) = Path::new(&output).parent() {
         std::fs::create_dir_all(parent).expect("create output directory");
     }
@@ -591,23 +556,41 @@ fn main() {
         .truncate(true)
         .open(output)
         .expect("open output");
-    file.set_len(total_size).expect("size output");
+    let mut offset = 0u64;
     use std::os::unix::fs::FileExt;
-    thread::scope(|scope| {
-        for start in (0..HOURS).step_by(range_size) {
-            let end = (start + range_size).min(HOURS);
-            let (order, endpoints, groups, hours, offsets) =
-                (&order, &endpoints, &groups, &hours, &offsets);
-            let file = &file;
-            scope.spawn(move || {
-                for hour in start..end {
-                    let buffer = format_hours(hour..hour + 1, order, endpoints, groups, hours);
-                    file.write_all_at(&buffer, offsets[hour])
-                        .expect("write output hour");
-                }
-            });
-        }
-    });
+    for batch in ranges.chunks(workers.div_ceil(2)) {
+        let output_buffers = thread::scope(|scope| {
+            let joins = batch
+                .iter()
+                .cloned()
+                .map(|range| {
+                    let (order, endpoints, groups, hours) = (&order, &endpoints, &groups, &hours);
+                    scope.spawn(move || format_hours(range, order, endpoints, groups, hours))
+                })
+                .collect::<Vec<_>>();
+            joins
+                .into_iter()
+                .map(|join| join.join().expect("format worker panicked"))
+                .collect::<Vec<_>>()
+        });
+        let offsets: Vec<_> = output_buffers
+            .iter()
+            .map(|buffer| {
+                let start = offset;
+                offset += buffer.len() as u64;
+                start
+            })
+            .collect();
+        thread::scope(|scope| {
+            for (buffer, offset) in output_buffers.into_iter().zip(offsets) {
+                let file = &file;
+                scope.spawn(move || {
+                    file.write_all_at(&buffer, offset)
+                        .expect("write output range");
+                });
+            }
+        });
+    }
     unsafe extern "C" {
         fn _exit(status: i32) -> !;
     }

@@ -1,6 +1,6 @@
 # Track A: Ingest
 
-H175 keeps H173's compact groups and 12 workers. It computes exact per-hour output offsets, then formats and writes one hour at a time from each worker, avoiding retained whole-output buffers. Board result pending; H174 scored 66.738816, and the best known remains v7 at 67.289394.
+H175 streamed one hour per write and scored 65.312968 points (0.076954 s, 41,390,080 B); the memory savings did not repay the sizing pass and small writes. H176 batches the parallel output buffers into two waves, cutting retained output memory without a sizing pass or 72 small writes. H176 is S=560; board result pending.
 
 AVX2 scans delimiters when the release target supports it, with a scalar fallback for other builds and for the tail of each range. Percentile ranks and error rates use exact integer arithmetic.
 
@@ -10,4 +10,4 @@ None. The solution uses Rust's standard library and small system calls for file 
 
 ## Board status
 
-H83, H173, and H174 scored 64.497525, 66.326361, and 66.738816. H175 targets output-buffer memory while retaining parallel writes; the goal remains 71.
+H83, H173, H174, and H175 remain below v7's best 67.289394. H176 targets output-buffer memory while retaining parallel writes; the goal remains 71.
