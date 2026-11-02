@@ -79,3 +79,37 @@ opt6-report.md
 /tools/*.sh
 /tools/logs/
 final-report.md
+
+# Compiled binaries and object files
+*.a
+*.dll
+*.dylib
+*.exe
+*.o
+*.so
+
+# Datasets and logs
+*.csv
+*.log
+*.tsv
+
+# Profiling and instrumentation
+*.profraw
+perf.data*
+
+# Editor swap, backup, and IDE files
+*.bak
+*.orig
+*.swo
+*.swp
+*~
+.gemini/
+.idea/
+.vscode/
+desktop.ini
+
+# Generated reports and clean-up logs
+*-report.md
+/tools/cleanup_logs/
+/tools/gate_raw/
+
