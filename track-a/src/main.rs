@@ -149,19 +149,27 @@ fn parse_uint(bytes: &[u8]) -> u32 {
 unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
     use std::arch::x86_64::*;
     let (mut p, mut first, mut second, mut found) = (28, 0, 0, 0);
-    while p + 32 <= line.len() {
-        // SAFETY: p+32 is within the readable line slice, so this unaligned vector load is in bounds.
-        let (newlines, mut spaces) = unsafe {
-            let block = _mm256_loadu_si256(line.as_ptr().add(p).cast());
+    while p + 64 <= line.len() {
+        // SAFETY: p+64 is within the readable input slice, so both vector loads are in bounds.
+        let (nl0, sp0, nl1, sp1) = unsafe {
+            let a = _mm256_loadu_si256(line.as_ptr().add(p).cast());
+            let b = _mm256_loadu_si256(line.as_ptr().add(p + 32).cast());
             (
-                _mm256_movemask_epi8(_mm256_cmpeq_epi8(block, _mm256_set1_epi8(b'\n' as i8)))
-                    as u32,
-                _mm256_movemask_epi8(_mm256_cmpeq_epi8(block, _mm256_set1_epi8(b' ' as i8))) as u32,
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, _mm256_set1_epi8(b'\n' as i8))) as u32,
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, _mm256_set1_epi8(b' ' as i8))) as u32,
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(b, _mm256_set1_epi8(b'\n' as i8))) as u32,
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(b, _mm256_set1_epi8(b' ' as i8))) as u32,
             )
         };
+        let newlines = u64::from(nl0) | (u64::from(nl1) << 32);
+        let mut spaces = u64::from(sp0) | (u64::from(sp1) << 32);
+        let stop = if newlines == 0 {
+            64
+        } else {
+            newlines.trailing_zeros() as usize
+        };
         if newlines != 0 {
-            let stop = newlines.trailing_zeros() as usize;
-            spaces &= (1u32 << stop).wrapping_sub(1);
+            spaces &= (1u64 << stop) - 1;
         }
         if found < 2 && spaces != 0 {
             if found == 0 {
@@ -175,9 +183,9 @@ unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
             }
         }
         if newlines != 0 {
-            return (p + newlines.trailing_zeros() as usize, first, second);
+            return (p + stop, first, second);
         }
-        p += 32;
+        p += 64;
     }
     for at in p..line.len() {
         if line[at] == b'\n' {
@@ -196,6 +204,20 @@ unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
 }
 
 fn parse_uint_swar(bytes: &[u8]) -> u32 {
+    if bytes.len() == 4 || bytes.len() == 5 {
+        // Fixed weights avoid a loop for the common four- and five-digit latencies.
+        let word = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+        let d0 = (word as u8 - b'0') as u32;
+        let d1 = ((word >> 8) as u8 - b'0') as u32;
+        let d2 = ((word >> 16) as u8 - b'0') as u32;
+        let d3 = ((word >> 24) as u8 - b'0') as u32;
+        let value = d0 * 1000 + d1 * 100 + d2 * 10 + d3;
+        return if bytes.len() == 5 {
+            value * 10 + u32::from(bytes[4] - b'0')
+        } else {
+            value
+        };
+    }
     if bytes.len() != 8 {
         return parse_uint(bytes);
     }

@@ -483,4 +483,8 @@ H188 board result: run-7008c4a3e7b5 scored T=0.054670 s, M=46,366,720 B, S=584, 
 
 H189 board result: run-aded64840da9 scored T=0.060009 s, M=46,718,976 B, S=570, K=22.403523, 67.515815 points. Removing fingerprint finalization weakened the hash distribution and regressed time; restored H184.
 
-| H190 | Scan one AVX2 block at a time and stop before loading a second block when LF is in the first, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |
+| H190 | Scan one AVX2 block at a time and stop before loading a second block when LF is in the first, atop H184 | run-74b711209003 | 09dae1cd70d003a21233b6d41879f99d5d5e73df | T=0.054888 s / M=46,477,312 B / S=566 / K=23.474428 / 68.529751 pts | Docker seed-1 hash and worked example passed | Rejected below H184; lower S was offset by slower time. Restored H184. |
+
+H190 board result: run-74b711209003 scored T=0.054888 s, M=46,477,312 B, S=566, K=23.474428, 68.529751 points. The one-block scanner cut eight S lines but did not improve time; restored H184.
+
+| H191 | Parse common 4- and 5-digit latency fields from one packed u32 load with fixed decimal weights, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |
