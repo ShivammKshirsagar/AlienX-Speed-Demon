@@ -347,9 +347,9 @@ These are single-change variants built from the baseline. Fill in each author-ru
 |---|---|---|---|---|
 | v1 | `_exit(0)` after output | RUN-ID-TBD | TBD | Delivered candidate; board result pending |
 | v2 | Arithmetic/SWAR/AVX2 line parser | RUN-ID-TBD | Points 66.987; T/M/S/K not supplied | Best known; just below 70 |
-| v3 | Open-address endpoint lookup | RUN-ID-TBD | TBD | Delivered candidate; board result pending |
+| v3 | Open-address endpoint lookup | RUN-ID-TBD | TBD | Current candidate; board result pending |
 | v4 | Per-worker bump arena for grouped latencies | RUN-ID-TBD | Points 62.753; T/M/S/K not supplied | Rejected; below baseline 66.975 |
-| v5 | Partial percentile selection | RUN-ID-TBD | TBD | Current candidate; board result pending |
+| v5 | Partial percentile selection | RUN-ID-TBD | Points 66.661; T/M/S/K not supplied | Rejected; below best 66.987 |
 
 ## Selection correction for board evidence
 
@@ -411,4 +411,5 @@ H164 scored 65.398 points on run `run-0e251929474d`, below the author-reported b
 |---|---|---|---|---|
 | v4 | Per-worker latency arena | RUN-ID-TBD | Points 62.753; T/M/S/K not supplied | Rejected; below baseline 66.975 |
 | v2 | Arithmetic/SWAR/AVX2 line parser | RUN-ID-TBD | Points 66.987; T/M/S/K not supplied | Best known so far; below target 70 |
-| v5 | Partial percentile selection | RUN-ID-TBD | TBD | Prepared from independently checked variant; awaiting board measurement |
+| v5 | Partial percentile selection | RUN-ID-TBD | Points 66.661; T/M/S/K not supplied | Rejected; below best 66.987 |
+| v3 | Open-address endpoint lookup | RUN-ID-TBD | TBD | Prepared from independently checked variant; awaiting board measurement |

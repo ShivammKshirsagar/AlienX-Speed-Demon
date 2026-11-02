@@ -37,6 +37,42 @@ impl Hasher for FastHasher {
 
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
 
+struct EndpointTable<'a> {
+    slots: Vec<(&'a [u8], usize)>,
+    len: usize,
+}
+// Empty slices mark unused slots; request endpoints are always nonempty paths.
+#[rustfmt::skip]
+impl<'a> EndpointTable<'a> {
+    fn new() -> Self { Self { slots: vec![(&[][..], 0); 16], len: 0 } }
+    fn hash(key: &[u8]) -> usize {
+        let limit = key.len().min(16); let (mut h, mut at) = (key.len() as u64, 0);
+        while at + 8 <= limit {
+            // SAFETY: the loop guarantees eight readable bytes in the first 16-byte key prefix.
+            h = h.rotate_left(13) ^ unsafe { std::ptr::read_unaligned(key.as_ptr().add(at).cast::<u64>()) }; at += 8;
+        }
+        for &b in &key[at..limit] { h = h.rotate_left(7) ^ u64::from(b); }
+        (h ^ (h >> 29)).wrapping_mul(0xbf58476d1ce4e5b9).wrapping_add(h >> 32) as usize
+    }
+    fn get(&self, key: &[u8]) -> Option<usize> {
+        let mask = self.slots.len() - 1; let mut at = Self::hash(key) & mask;
+        while !self.slots[at].0.is_empty() { let (old, id) = self.slots[at]; if old == key { return Some(id); } at = (at + 1) & mask; }
+        None
+    }
+    fn raw(&mut self, key: &'a [u8], id: usize) {
+        let mask = self.slots.len() - 1; let mut at = Self::hash(key) & mask;
+        while !self.slots[at].0.is_empty() { at = (at + 1) & mask; }
+        self.slots[at] = (key, id); self.len += 1;
+    }
+    fn insert(&mut self, key: &'a [u8], id: usize) {
+        if (self.len + 1) * 10 >= self.slots.len() * 7 {
+            let cap = self.slots.len() * 2; let old = std::mem::replace(&mut self.slots, vec![(&[][..], 0); cap]); self.len = 0;
+            for (key, id) in old { if !key.is_empty() { self.raw(key, id); } }
+        }
+        self.raw(key, id);
+    }
+}
+
 struct Group {
     latencies: Vec<u32>,
     errors: u32,
@@ -59,7 +95,7 @@ impl Group {
 
 struct Local<'a> {
     endpoints: Vec<&'a [u8]>,
-    endpoint_ids: FastMap<&'a [u8], usize>,
+    endpoint_ids: EndpointTable<'a>,
     groups: Vec<FastMap<usize, Group>>,
 }
 
@@ -67,13 +103,13 @@ impl<'a> Local<'a> {
     fn new() -> Self {
         Self {
             endpoints: Vec::new(),
-            endpoint_ids: FastMap::default(),
+            endpoint_ids: EndpointTable::new(),
             groups: (0..HOURS).map(|_| FastMap::default()).collect(),
         }
     }
 
     fn endpoint_id(&mut self, bytes: &'a [u8]) -> usize {
-        if let Some(&id) = self.endpoint_ids.get(bytes) {
+        if let Some(id) = self.endpoint_ids.get(bytes) {
             return id;
         }
         let id = self.endpoints.len();
@@ -334,13 +370,13 @@ fn main() {
             .collect::<Vec<_>>()
     });
 
-    let mut global_ids: FastMap<&[u8], usize> = FastMap::default();
+    let mut global_ids = EndpointTable::new();
     let mut endpoints: Vec<&[u8]> = Vec::new();
     let mut remaps = Vec::with_capacity(locals.len());
     for local in &mut locals {
         let mut remap = Vec::with_capacity(local.endpoints.len());
         for endpoint in local.endpoints.drain(..) {
-            let id = if let Some(&id) = global_ids.get(endpoint) {
+            let id = if let Some(id) = global_ids.get(endpoint) {
                 id
             } else {
                 let id = endpoints.len();
@@ -446,26 +482,11 @@ fn main() {
             remaining = tail;
             scope.spawn(move || {
                 for group in slice.iter_mut().filter(|g| !g.latencies.is_empty()) {
+                    group.latencies.sort_unstable();
                     let n = group.latencies.len();
-                    if n == 1 {
-                        group.p50 = group.latencies[0];
-                        group.p95 = group.p50;
-                        group.p99 = group.p50;
-                    } else if n <= 48 {
-                        group.latencies.sort_unstable();
-                        group.p50 = group.latencies[(50 * n + 99) / 100 - 1];
-                        group.p95 = group.latencies[(95 * n + 99) / 100 - 1];
-                        group.p99 = group.latencies[(99 * n + 99) / 100 - 1];
-                    } else {
-                        let r99 = (99 * n + 99) / 100 - 1;
-                        let (left99, p99, _) = group.latencies.select_nth_unstable(r99);
-                        group.p99 = *p99;
-                        let r95 = (95 * n + 99) / 100 - 1;
-                        let (left95, p95, _) = left99.select_nth_unstable(r95);
-                        group.p95 = *p95;
-                        let r50 = (50 * n + 99) / 100 - 1;
-                        group.p50 = left95.select_nth_unstable(r50).1.to_owned();
-                    }
+                    group.p50 = group.latencies[(50 * n + 99) / 100 - 1];
+                    group.p95 = group.latencies[(95 * n + 99) / 100 - 1];
+                    group.p99 = group.latencies[(99 * n + 99) / 100 - 1];
                 }
             });
         }
