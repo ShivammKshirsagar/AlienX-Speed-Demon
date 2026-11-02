@@ -32,6 +32,8 @@ Do not fill run IDs or board metrics from local measurements. v7 (parser plus ex
 
 | H179 fast integer output | 04c3fa8776c2265fb4c915876dbd4d6449c87fcb | run-018d7b51d241 | 0.063230 s | 47,517,696 B | 544 | 21.904427 | 67.026595 points; correctness passed, rejected below v7 |
 
-| H180 two-block AVX2 scan | 47f85506c59f97544112929f55000ce39c275ff6 | run-c09af698dc5c | Build failed | — | — | — | Scanner transplant omitted `parse_uint_swar`; board build error identified it. |
+| H180 two-block AVX2 scan | 47f85506c59f97544112929f55000ce39c275ff6 | run-c09af698dc5c | Build failed | â€” | â€” | â€” | Scanner transplant omitted `parse_uint_swar`; board build error identified it. |
 
-| H181 corrected two-block AVX2 scan | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Restored helper; official local Docker check passed full seed-1 hash; board result pending |
+| H181 corrected two-block AVX2 scan | b9bd6a765441c2e0ba5b0f82cc40fe7754cf8e38 | run-0a505087a037 | 0.061442 s | 47,497,216 B | 534 | 22.284706 | 67.400345 points; correctness passed, new best |
+
+| H182 SWAR latency parser | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Four-digit chunks for 4–7 digit latency fields, atop H181; local correctness pending |

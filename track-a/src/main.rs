@@ -156,15 +156,22 @@ unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
     (line.len(), first, second)
 }
 
+fn parse_four(bytes: &[u8]) -> u32 {
+    let digits = u32::from_le_bytes(bytes[..4].try_into().unwrap()) - 0x30303030;
+    let pairs = (digits & 0x00ff00ff) * 10 + ((digits >> 8) & 0x00ff00ff);
+    (pairs & 0xffff) * 100 + (pairs >> 16)
+}
+
 fn parse_uint_swar(bytes: &[u8]) -> u32 {
-    if bytes.len() != 8 {
+    if !(4..=8).contains(&bytes.len()) {
         return parse_uint(bytes);
     }
-    // SAFETY: exactly eight token bytes are readable; converting from LE fixes byte order.
-    let word = u64::from_le(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast()) });
-    let mut value = 0u32;
-    for shift in 0..8 {
-        value = value * 10 + ((word >> (shift * 8)) as u8 - b'0') as u32;
+    let mut value = parse_four(&bytes[..4]);
+    if bytes.len() == 8 {
+        return value * 10_000 + parse_four(&bytes[4..]);
+    }
+    for &byte in &bytes[4..] {
+        value = value * 10 + u32::from(byte - b'0');
     }
     value
 }
