@@ -491,4 +491,8 @@ H190 board result: run-74b711209003 scored T=0.054888 s, M=46,477,312 B, S=566, 
 
 H191 board result: run-7d38c5531254 scored T=0.054760 s, M=46,125,056 B, S=587, K=23.409362, 68.469479 points. Fixed-width 4- and 5-digit parsing did not improve the board score; restored H184.
 
-| H192 | Force inline `push_uint`, the decimal output formatter, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |
+| H192 | Force inline `push_uint`, the decimal output formatter, atop H184 | run-9559d5e4b4e2 | a789d951a46f3abdd602a09f7ab75fa50b5fdef4 | T=0.074997 s / M=46,514,176 B / S=575 / K=20.031580 / 65.085760 pts | Docker seed-1 hash and worked example passed | Rejected; compiler inlining caused a large wall-time regression. Restored H184. |
+
+H192 board result: run-9559d5e4b4e2 scored T=0.074997 s, M=46,514,176 B, S=575, K=20.031580, 65.085760 points. Forcing `push_uint` inline bloated the hot path and regressed time; restored H184.
+
+| H193 | Reserve 8,192 endpoint slices in each parser worker, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |

@@ -57,4 +57,6 @@ Do not fill run IDs or board metrics from local measurements. v7 (parser plus ex
 
 | H191 fixed-width latency parser | aa6f883db22122f43f9b40fc1a020f84a13c9155 | run-7d38c5531254 | 0.054760 s | 46,125,056 B | 587 | 23.409362 | 68.469479 points; correctness passed, rejected below H184 |
 
+| H192 force-inline output formatter | a789d951a46f3abdd602a09f7ab75fa50b5fdef4 | run-9559d5e4b4e2 | 0.074997 s | 46,514,176 B | 575 | 20.031580 | 65.085760 points; correctness passed, rejected below H184 |
+
 | H184 integer group-key hash | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Specializes eight-byte group-key hashing; full Docker check pending. |

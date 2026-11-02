@@ -112,7 +112,8 @@ struct Local<'a> {
 impl<'a> Local<'a> {
     fn new() -> Self {
         Self {
-            endpoints: Vec::new(),
+            // Reserve for the common worker-local endpoint count; Vec still grows if needed.
+            endpoints: Vec::with_capacity(8192),
             endpoint_ids: FastMap::default(),
             groups: (0..HOURS).map(|_| FastMap::default()).collect(),
         }
@@ -326,7 +327,6 @@ fn hour_strings() -> Vec<[u8; 20]> {
         .collect()
 }
 
-#[inline(always)]
 fn push_uint(out: &mut Vec<u8>, mut n: u64) {
     let mut digits = [0u8; 20];
     let mut at = digits.len();
