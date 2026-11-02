@@ -25,3 +25,7 @@
 | H178 rough output reserve | 249b11156def0eccfd0305cfcf61577aa474f69b | run-8199196f223f | 0.059838 s | 52,527,104 B | 559 | 21.979985 | 67.101370 points; rejected below v7 |
 
 Do not fill run IDs or board metrics from local measurements. v7 (parser plus exit) remains the best known board result at 67.289. H178 scored below v7; the active source has been restored to board-proven v7 (SHA256 `2FD6CA6CFA5551C735C3A2D2D812D767D1334FA60570302F480D2E157960AE17`). Continue using real board results; the active milestone is at least 71 points.
+
+| v7 restore repeat | 66be859cf79f1e836d99272c550a730361ced921 | run-a53fa3e56639 | 0.065110 s | 47,505,408 B | 526 | 21.696220 | 66.819204 points; same v7 source, below historical best 67.289394 |
+
+| H179 fast integer output | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Pairwise decimal formatter atop v7; boundary equivalence checked; board result pending |

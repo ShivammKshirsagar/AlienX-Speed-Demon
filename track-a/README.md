@@ -10,4 +10,4 @@ None. The solution uses Rust's standard library and small system calls for file 
 
 ## Board status
 
-H83, H173, H174, H175, H176, H177, and H178 remain below v7's best 67.289394. The active source is restored to board-proven v7; the goal remains 71.
+H83, H173, H174, H175, H176, H177, and H178 remain below v7's best 67.289394. The active source is restored to v7. A repeat scored 66.819204; the historical best remains 67.289394, and the goal remains 71.

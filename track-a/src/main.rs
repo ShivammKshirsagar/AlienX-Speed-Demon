@@ -270,16 +270,36 @@ fn hour_strings() -> Vec<[u8; 20]> {
         .collect()
 }
 
+const fn digit_pairs() -> [u8; 200] {
+    let mut digits = [0; 200];
+    let mut value = 0;
+    while value < 100 {
+        digits[value * 2] = b'0' + (value / 10) as u8;
+        digits[value * 2 + 1] = b'0' + (value % 10) as u8;
+        value += 1;
+    }
+    digits
+}
+
+const DIGIT_PAIRS: [u8; 200] = digit_pairs();
+
 fn push_uint(out: &mut Vec<u8>, mut n: u64) {
     let mut digits = [0u8; 20];
     let mut at = digits.len();
-    loop {
+    while n >= 100 {
+        let quotient = n / 100;
+        let pair = (n - quotient * 100) as usize * 2;
+        at -= 2;
+        digits[at..at + 2].copy_from_slice(&DIGIT_PAIRS[pair..pair + 2]);
+        n = quotient;
+    }
+    if n >= 10 {
+        at -= 2;
+        let pair = n as usize * 2;
+        digits[at..at + 2].copy_from_slice(&DIGIT_PAIRS[pair..pair + 2]);
+    } else {
         at -= 1;
-        digits[at] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
+        digits[at] = b'0' + n as u8;
     }
     out.extend_from_slice(&digits[at..]);
 }
