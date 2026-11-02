@@ -455,4 +455,8 @@ H181 board result: run-0a505087a037 scored T=0.061442 s, M=47,497,216 B, S=534, 
 
 H182 board result: run-5643c5c53bec scored T=0.061457 s, M=47,566,848 B, S=541, K=22.231986, 67.348913 points. Correctness passed, but this is below H181's 67.400345; restored H181 as the active best.
 
-| H183 | Cached endpoint fingerprint in HashMap keys with full-byte equality, atop H181 | RUN-ID-TBD | COMMIT-TBD | TBD | Not measured locally; full seed-1 Docker hash passed | Pending board result |
+| H183 | Cached endpoint fingerprint in HashMap keys with full-byte equality, atop H181 | run-23f2062c4422 | 161c9098ffa156584c48982a3220e464870e0bca | T=0.054407 s / M=46,309,376 B / S=570 / K=23.570131 / 68.618100 pts | Full seed-1 Docker hash passed | Kept; new board best, target 71 remains unmet. |
+
+H183 board result: run-23f2062c4422 scored T=0.054407 s, M=46,309,376 B, S=570, K=23.570131, 68.618100 points. Cached endpoint fingerprints reduced repeated key hashing while preserving full-byte equality; full seed-1 hash passed. This is the current best, still below 71.
+
+| H184 | Multiply-mix 64-bit group IDs in FastHasher, atop H183 | RUN-ID-TBD | COMMIT-TBD | TBD | Not measured locally; full Docker check pending | Pending board result |

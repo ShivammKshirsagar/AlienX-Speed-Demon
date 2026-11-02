@@ -39,4 +39,6 @@ Do not fill run IDs or board metrics from local measurements. v7 (parser plus ex
 | H182 SWAR latency parser | bfa4505c02555fffc2240f043555afbf0b4d3443 | run-5643c5c53bec | 0.061457 s | 47,566,848 B | 541 | 22.231986 | 67.348913 points; correctness passed, below H181 |
 
 | H182 four-digit SWAR latency parser | bfa4505c02555fffc2240f043555afbf0b4d3443 | run-5643c5c53bec | 0.061457 s | 47,566,848 B | 541 | 22.231986 | 67.348913 points; correctness passed, below H181 |
-| H183 cached endpoint fingerprint | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Endpoint hash uses first/last words and length; exact byte equality resolves collisions; full Docker hash passed. |
+| H183 cached endpoint fingerprint | 161c9098ffa156584c48982a3220e464870e0bca | run-23f2062c4422 | 0.054407 s | 46,309,376 B | 570 | 23.570131 | 68.618100 points; full seed-1 hash passed, new best |
+
+| H184 integer group-key hash | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Specializes eight-byte group-key hashing; full Docker check pending. |

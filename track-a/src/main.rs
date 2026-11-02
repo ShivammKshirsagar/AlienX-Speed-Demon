@@ -12,6 +12,11 @@ struct FastHasher(u64);
 
 impl Hasher for FastHasher {
     fn write(&mut self, bytes: &[u8]) {
+        // Group keys are 64-bit integers, so one odd multiply mixes them cheaply.
+        if bytes.len() == 8 {
+            self.0 = u64::from_ne_bytes(bytes.try_into().unwrap()).wrapping_mul(0x9e3779b185ebca87);
+            return;
+        }
         let mut h = if self.0 == 0 {
             0xcbf29ce484222325
         } else {
