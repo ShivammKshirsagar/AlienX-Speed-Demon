@@ -6,7 +6,6 @@ use std::thread;
 
 const HOURS: usize = 72;
 const MAX_THREADS: usize = 12;
-const POST_PARSE_THREADS: usize = 12;
 const INITIAL_ECAP: usize = 2048;
 
 #[derive(Default)]
@@ -365,28 +364,14 @@ fn push_uint(out: &mut Vec<u8>, mut n: u64) {
     out.extend_from_slice(&digits[at..]);
 }
 
-fn push_uint32(out: &mut Vec<u8>, mut n: u32) {
-    let mut digits = [0u8; 10];
-    let mut at = digits.len();
-    loop {
-        at -= 1;
-        digits[at] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    out.extend_from_slice(&digits[at..]);
-}
-
 fn format_hours(
     range: std::ops::Range<usize>,
     order: &[usize],
     endpoints: &[&[u8]],
     groups: &[Group],
     hours: &[[u8; 20]],
-    out: &mut Vec<u8>,
-) {
+) -> Vec<u8> {
+    let mut out = Vec::new();
     for hour in range {
         for &endpoint in order {
             let group = &groups[hour * endpoints.len() + endpoint];
@@ -398,20 +383,21 @@ fn format_hours(
             out.extend_from_slice(endpoints[endpoint]);
             out.push(b' ');
             let count = group.latencies.len() as u64;
-            push_uint(out, count);
+            push_uint(&mut out, count);
             out.push(b' ');
-            push_uint32(out, group.p50);
+            push_uint(&mut out, u64::from(group.p50));
             out.push(b' ');
-            push_uint32(out, group.p95);
+            push_uint(&mut out, u64::from(group.p95));
             out.push(b' ');
-            push_uint32(out, group.p99);
+            push_uint(&mut out, u64::from(group.p99));
             out.push(b' ');
-            push_uint32(out, group.errors);
+            push_uint(&mut out, u64::from(group.errors));
             out.push(b' ');
-            push_uint32(out, (u64::from(group.errors) * 1_000_000 / count) as u32);
+            push_uint(&mut out, u64::from(group.errors) * 1_000_000 / count);
             out.push(b'\n');
         }
     }
+    out
 }
 
 fn main() {
@@ -451,7 +437,6 @@ fn main() {
             .collect::<Vec<_>>()
     });
 
-    let workers = workers.min(POST_PARSE_THREADS);
     let mut global_ids: HashMap<&[u8], usize> = HashMap::new();
     let mut endpoints: Vec<&[u8]> = Vec::new();
     let mut remaps = Vec::with_capacity(locals.len());
@@ -557,38 +542,57 @@ fn main() {
     let mut order: Vec<usize> = (0..endpoints.len()).collect();
     order.sort_unstable_by(|&a, &b| endpoints[a].cmp(endpoints[b]));
     let hours = hour_strings();
-    let mut hour_sizes = [0usize; HOURS];
-    for hour in 0..HOURS {
-        for &endpoint in &order {
-            let group = &groups[hour * endpoints.len() + endpoint];
-            if !group.latencies.is_empty() {
-                hour_sizes[hour] += endpoints[endpoint].len() + 48;
-            }
-        }
-    }
+    let range_size = HOURS.div_ceil(workers);
+    let ranges: Vec<_> = (0..HOURS)
+        .step_by(range_size)
+        .map(|start| start..(start + range_size).min(HOURS))
+        .collect();
+    let output_buffers = thread::scope(|scope| {
+        let joins = ranges
+            .into_iter()
+            .map(|range| {
+                let (order, endpoints, groups, hours) = (&order, &endpoints, &groups, &hours);
+                scope.spawn(move || format_hours(range, order, endpoints, groups, hours))
+            })
+            .collect::<Vec<_>>();
+        joins
+            .into_iter()
+            .map(|join| join.join().expect("format worker panicked"))
+            .collect::<Vec<_>>()
+    });
     if let Some(parent) = Path::new(&output).parent() {
         std::fs::create_dir_all(parent).expect("create output directory");
     }
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .open(output)
         .expect("open output");
-    use std::io::Write;
-    let mut buffer = Vec::with_capacity(hour_sizes.iter().copied().max().unwrap_or(0));
-    for hour in 0..HOURS {
-        buffer.clear();
-        format_hours(
-            hour..hour + 1,
-            &order,
-            &endpoints,
-            &groups,
-            &hours,
-            &mut buffer,
-        );
-        file.write_all(&buffer).expect("write output hour");
+    let total_size = output_buffers.iter().map(Vec::len).sum::<usize>();
+    file.set_len(total_size as u64).expect("size output");
+    let mut offset = 0u64;
+    let offsets = output_buffers
+        .iter()
+        .map(|buffer| {
+            let start = offset;
+            offset += buffer.len() as u64;
+            start
+        })
+        .collect::<Vec<_>>();
+    use std::os::unix::fs::FileExt;
+    thread::scope(|scope| {
+        for (buffer, offset) in output_buffers.into_iter().zip(offsets) {
+            let file = &file;
+            scope.spawn(move || {
+                file.write_all_at(&buffer, offset)
+                    .expect("write output range");
+            });
+        }
+    });
+    unsafe extern "C" {
+        fn _exit(status: i32) -> !;
     }
-    drop(mapping);
-    std::process::exit(0);
+    // SAFETY: output workers have joined and no destructor is needed after the write.
+    unsafe { _exit(0) }
 }

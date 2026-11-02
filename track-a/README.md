@@ -1,6 +1,6 @@
 # Track A: Ingest
 
-The current candidate is H173, derived from H142's compact group storage and changed to use up to twelve parse workers and twelve later-phase workers. It maps `requests.log` read-only, scans newline-aligned ranges, and keeps the pinned x86-64-v3 target. Source S=555; board result pending. The known best remains v7 at 67.289394 points.
+H174 keeps H173's compact groups and 12 workers, then formats fixed equal-hour blocks in parallel and writes them by position before `_exit`. It is at S=559; board result pending. H173 scored 66.326361 points and v7 remains best at 67.289394.
 
 AVX2 scans delimiters when the release target supports it, with a scalar fallback for other builds and for the tail of each range. Percentile ranks and error rates use exact integer arithmetic.
 
@@ -10,4 +10,4 @@ None. The solution uses Rust's standard library and small system calls for file 
 
 ## Board status
 
-H83 scored 64.497525 points and was rejected. H173 is pending; the best known board result remains 67.289 points and the active target is at least 71.
+H83 scored 64.497525 and H173 scored 66.326361; both are below v7. H174 is the active output-path candidate; the target is at least 71.
