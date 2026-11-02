@@ -479,4 +479,8 @@ H187 board result: run-7ece9888b7cf scored T=0.056983 s, M=51,863,552 B, S=551, 
 
 H188 board result: run-7008c4a3e7b5 scored T=0.054670 s, M=46,366,720 B, S=584, K=23.422144, 68.481333 points. The endpoint cache was slightly below H184; reverted.
 
-| H189 | Remove one multiply and two xor-shifts from endpoint fingerprint finalization, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |
+| H189 | Remove one multiply and two xor-shifts from endpoint fingerprint finalization, atop H184 | run-aded64840da9 | 82bdd93e6f14f91e01d83301626b7d3cd88fe31c | T=0.060009 s / M=46,718,976 B / S=570 / K=22.403523 / 67.515815 pts | Docker seed-1 hash and worked example passed | Rejected; weaker bucket distribution regressed runtime. Restored H184. |
+
+H189 board result: run-aded64840da9 scored T=0.060009 s, M=46,718,976 B, S=570, K=22.403523, 67.515815 points. Removing fingerprint finalization weakened the hash distribution and regressed time; restored H184.
+
+| H190 | Scan one AVX2 block at a time and stop before loading a second block when LF is in the first, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |

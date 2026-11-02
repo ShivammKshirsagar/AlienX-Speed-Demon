@@ -51,4 +51,6 @@ Do not fill run IDs or board metrics from local measurements. v7 (parser plus ex
 
 | H188 last endpoint cache | 1929ececd90d33150d3e9c2f272ae36b5ce8bfd6 | run-7008c4a3e7b5 | 0.054670 s | 46,366,720 B | 584 | 23.422144 | 68.481333 points; correctness passed, rejected below H184 |
 
+| H189 lighter endpoint fingerprint | 82bdd93e6f14f91e01d83301626b7d3cd88fe31c | run-aded64840da9 | 0.060009 s | 46,718,976 B | 570 | 22.403523 | 67.515815 points; correctness passed, rejected below H184 |
+
 | H184 integer group-key hash | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Specializes eight-byte group-key hashing; full Docker check pending. |

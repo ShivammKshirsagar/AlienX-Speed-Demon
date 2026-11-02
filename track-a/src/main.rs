@@ -62,8 +62,11 @@ fn endpoint_hash(bytes: &[u8]) -> u64 {
     } else {
         first
     };
-    // Full endpoint bytes are still compared on collisions, so this fingerprint only selects buckets.
-    first ^ last.rotate_left(23) ^ (bytes.len() as u64).wrapping_mul(0x9e3779b185ebca87)
+    let mut h =
+        first ^ last.rotate_left(23) ^ (bytes.len() as u64).wrapping_mul(0x9e3779b185ebca87);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51afd7ed558ccd);
+    h ^ (h >> 33)
 }
 
 impl PartialEq for Endpoint<'_> {
@@ -146,27 +149,19 @@ fn parse_uint(bytes: &[u8]) -> u32 {
 unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
     use std::arch::x86_64::*;
     let (mut p, mut first, mut second, mut found) = (28, 0, 0, 0);
-    while p + 64 <= line.len() {
-        // SAFETY: p+64 is within the readable input slice, so both vector loads are in bounds.
-        let (nl0, sp0, nl1, sp1) = unsafe {
-            let a = _mm256_loadu_si256(line.as_ptr().add(p).cast());
-            let b = _mm256_loadu_si256(line.as_ptr().add(p + 32).cast());
+    while p + 32 <= line.len() {
+        // SAFETY: p+32 is within the readable line slice, so this unaligned vector load is in bounds.
+        let (newlines, mut spaces) = unsafe {
+            let block = _mm256_loadu_si256(line.as_ptr().add(p).cast());
             (
-                _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, _mm256_set1_epi8(b'\n' as i8))) as u32,
-                _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, _mm256_set1_epi8(b' ' as i8))) as u32,
-                _mm256_movemask_epi8(_mm256_cmpeq_epi8(b, _mm256_set1_epi8(b'\n' as i8))) as u32,
-                _mm256_movemask_epi8(_mm256_cmpeq_epi8(b, _mm256_set1_epi8(b' ' as i8))) as u32,
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(block, _mm256_set1_epi8(b'\n' as i8)))
+                    as u32,
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(block, _mm256_set1_epi8(b' ' as i8))) as u32,
             )
         };
-        let newlines = u64::from(nl0) | (u64::from(nl1) << 32);
-        let mut spaces = u64::from(sp0) | (u64::from(sp1) << 32);
-        let stop = if newlines == 0 {
-            64
-        } else {
-            newlines.trailing_zeros() as usize
-        };
         if newlines != 0 {
-            spaces &= (1u64 << stop) - 1;
+            let stop = newlines.trailing_zeros() as usize;
+            spaces &= (1u32 << stop).wrapping_sub(1);
         }
         if found < 2 && spaces != 0 {
             if found == 0 {
@@ -180,9 +175,9 @@ unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
             }
         }
         if newlines != 0 {
-            return (p + stop, first, second);
+            return (p + newlines.trailing_zeros() as usize, first, second);
         }
-        p += 64;
+        p += 32;
     }
     for at in p..line.len() {
         if line[at] == b'\n' {
