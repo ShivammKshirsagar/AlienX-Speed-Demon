@@ -9,5 +9,6 @@
 | v3 endpoint table | Commit/run ID not supplied | Not supplied | Not supplied | Not supplied | Not supplied | Not supplied | 66.506 points; rejected, below v2 |
 | v1 exit path | Commit/run ID not supplied | Not supplied | Not supplied | Not supplied | Not supplied | Not supplied | 67.034 points; new best, target 70 not reached |
 | v7 parser + exit | Commit/run ID not supplied | Not supplied | Not supplied | Not supplied | Not supplied | Not supplied | 67.289 points; new best, target 70 not reached |
+| v8 parser + exit + selection | Commit/run ID not supplied | Not supplied | Not supplied | Not supplied | Not supplied | Not supplied | 67.105 points; rejected, below v7 |
 
-Do not fill run IDs or board metrics from local measurements. Current local push candidate is v8 (v7 parser/exit plus v5 percentile selection), prepared for the author to push to the `speed-demon` branch after its combined build/check. v7 remains the best known board result at 67.289 until v8 is scored. Continue using real board results; the active milestone is at least 70 points.
+Do not fill run IDs or board metrics from local measurements. Current local push candidate is c3 (shared-mapped output with positioned-write fallback), copied from `tools/track-a/candidates/c3/`. v7 remains the best known board result at 67.289 until c3 is scored. Continue using real board results; the active milestone is at least 70 points.

@@ -349,7 +349,7 @@ These are single-change variants built from the baseline. Fill in each author-ru
 | v2 | Arithmetic/SWAR/AVX2 line parser | RUN-ID-TBD | Points 66.987; T/M/S/K not supplied | Best known; just below 70 |
 | v3 | Open-address endpoint lookup | RUN-ID-TBD | Points 66.506; T/M/S/K not supplied | Rejected; below best 66.987 |
 | v7 | v1 exit path plus v2 parser | RUN-ID-TBD | Points 67.289; T/M/S/K not supplied | Best known so far; below target 70 |
-| v8 | v7 plus v5 percentile selection | RUN-ID-TBD | TBD | Current candidate; board build and score pending |
+| v8 | v7 plus v5 percentile selection | RUN-ID-TBD | Points 67.105; T/M/S/K not supplied | Rejected; below v7 67.289 |
 | v4 | Per-worker bump arena for grouped latencies | RUN-ID-TBD | Points 62.753; T/M/S/K not supplied | Rejected; below baseline 66.975 |
 | v5 | Partial percentile selection | RUN-ID-TBD | Points 66.661; T/M/S/K not supplied | Rejected; below best 66.987 |
 
@@ -417,4 +417,5 @@ H164 scored 65.398 points on run `run-0e251929474d`, below the author-reported b
 | v3 | Open-address endpoint lookup | RUN-ID-TBD | Points 66.506; T/M/S/K not supplied | Rejected; below best 66.987 |
 | v1 | `_exit(0)` after output | RUN-ID-TBD | Points 67.034; T/M/S/K not supplied | Best known so far; below target 70 |
 | v7 | v1 exit path plus v2 parser | RUN-ID-TBD | Points 67.289; T/M/S/K not supplied | Best known so far; below target 70 |
-| v8 | v7 plus v5 percentile selection | RUN-ID-TBD | TBD | Prepared from checked component variants; combined build/test pending |
+| v8 | v7 plus v5 percentile selection | RUN-ID-TBD | Points 67.105; T/M/S/K not supplied | Rejected; below v7 67.289 |
+| c3 | Shared-mapped output with positioned-write fallback | RUN-ID-TBD | TBD | Prepared from existing candidate; awaiting board build and score |
