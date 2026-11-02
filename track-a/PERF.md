@@ -471,4 +471,8 @@ H185 board result: run-6164043f1eca scored T=0.064468 s, M=48,709,632 B, S=619, 
 
 H186 board result: run-6f3fc7b14c3a scored T=0.058531 s, M=56,606,720 B, S=542, K=21.995707, 67.116897 points. Sparse per-hour HashMaps reduced the matrix line count but increased runtime and memory; reverted to H184.
 
-| H187 | Sparse populated-group vector, sort by output key, merge duplicates in place, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |
+| H187 | Sparse group vectors sorted by output key and merged in place, atop H184 | run-7ece9888b7cf | 75037486d75e0dccbf4a8911e209c6d8e0389188 | T=0.056983 s / M=51,863,552 B / S=551 / K=22.630104 / 67.734327 pts | Docker seed-1 hash, worked example and empty input passed | Rejected below H184; time and memory rose. Restored H184. |
+
+H187 board result: run-7ece9888b7cf scored T=0.056983 s, M=51,863,552 B, S=551, K=22.630104, 67.734327 points. Flat-vector merging improved over H186 but remained below H184; restored H184.
+
+| H188 | Cache exact last endpoint ID per parser worker to skip repeated endpoint-map probes, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |

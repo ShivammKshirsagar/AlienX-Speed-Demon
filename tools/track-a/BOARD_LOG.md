@@ -47,4 +47,6 @@ Do not fill run IDs or board metrics from local measurements. v7 (parser plus ex
 
 | H186 sparse group hash maps | e3922627c64d192e737d8d759a44ecee66bd0458 | run-6f3fc7b14c3a | 0.058531 s | 56,606,720 B | 542 | 21.995707 | 67.116897 points; correctness passed, rejected below H184 |
 
+| H187 sparse sorted group vectors | 75037486d75e0dccbf4a8911e209c6d8e0389188 | run-7ece9888b7cf | 0.056983 s | 51,863,552 B | 551 | 22.630104 | 67.734327 points; correctness passed, rejected below H184 |
+
 | H184 integer group-key hash | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Specializes eight-byte group-key hashing; full Docker check pending. |
