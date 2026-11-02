@@ -21,6 +21,7 @@
 | H174 parallel output | `8c1a1e1e2d1908240e2b2eea5ae9a0b5611f5a57` | run-4dc5f1362b5c | 0.061107 s | 54,181,888 B | 559 | 21.616049 | 66.738816 points; gates passed, rejected below v7 K |
 | H175 streaming parallel writes | `25679c4324fa4a301c01cbd584c766d874e7856a` | run-cb0b856f78a8 | 0.076954 s | 41,390,080 B | 575 | 20.242277 | 65.312968 points; passed gates but time regressed; rejected |
 | H176 batched output | `6717f04953005925102fde2ba02a375b32c00293` | run-5d0099fd4be7 | 0.079591 s | 46,931,968 B | 560 | 19.487246 | 64.487523 points; gates passed, rejected for time regression |
-| H177 capacity-reserved parallel output | Pending commit | RUN-ID-TBD | TBD | TBD | 575 | Active candidate; one-wave output, capacity estimate uses active rows and endpoint length; source SHA256 `D4270056D048E830EDB92A02CEC325EC070C9204CED4F92E06B20B8887091628` |
+| H177 capacity-reserved parallel output | `1e2eb13b0f33b242b3b37736130f0f3105c002af` | run-6d2621482e1e | 0.067338 s | 50,778,112 B | 575 | 20.772502 | 65.874440 points; passed gates; extra sizing pass cost time |
+| H178 rough output reserve | Pending commit | RUN-ID-TBD | TBD | TBD | 559 | Active candidate; avoids sizing pass, capacity estimate only affects allocation; source SHA256 `5A3CAA90AED8280808C7210F75972D4DAC3C3A15AE203800FD6840C2C656EF8A` |
 
 Do not fill run IDs or board metrics from local measurements. v7 (parser plus exit) remains the best known board result at 67.289. Current push candidate is H142, source SHA256 `4770755B0BD792863ED53D54B44D0F07CEE2F62152A2F38A742F55171B66F138`; it passed the recorded local correctness suite but has no board result. Continue using real board results; the active milestone is at least 71 points.

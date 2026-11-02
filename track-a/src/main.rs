@@ -371,23 +371,7 @@ fn format_hours(
     groups: &[Group],
     hours: &[[u8; 20]],
 ) -> Vec<u8> {
-    let capacity = range
-        .clone()
-        .map(|hour| {
-            order
-                .iter()
-                .map(|&endpoint| {
-                    let group = &groups[hour * endpoints.len() + endpoint];
-                    if group.latencies.is_empty() {
-                        0
-                    } else {
-                        endpoints[endpoint].len() + 48
-                    }
-                })
-                .sum::<usize>()
-        })
-        .sum();
-    let mut out = Vec::with_capacity(capacity);
+    let mut out = Vec::with_capacity(range.len() * endpoints.len() * 32);
     for hour in range {
         for &endpoint in order {
             let group = &groups[hour * endpoints.len() + endpoint];

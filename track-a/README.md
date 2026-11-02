@@ -1,6 +1,6 @@
 # Track A: Ingest
 
-H175 and H176 reduced output memory but scored 65.312968 and 64.487523 because output time regressed. H177 returns to H174's single-wave parallel path and reserves each buffer from active rows; this adds an output-size pass but should avoid geometric buffer growth.
+H175, H176, and H177 scored 65.312968, 64.487523, and 65.874440. H177's active-row capacity scan reduced memory but cost time. H178 skips that scan and uses a rough allocation hint while keeping the same parallel output path.
 
 AVX2 scans delimiters when the release target supports it, with a scalar fallback for other builds and for the tail of each range. Percentile ranks and error rates use exact integer arithmetic.
 
@@ -10,4 +10,4 @@ None. The solution uses Rust's standard library and small system calls for file 
 
 ## Board status
 
-H83, H173, H174, H175, and H176 remain below v7's best 67.289394. H177 targets lower memory without reducing output parallelism; the goal remains 71.
+H83, H173, H174, H175, H176, and H177 remain below v7's best 67.289394. H178 tests a cheaper buffer reserve; the goal remains 71.
