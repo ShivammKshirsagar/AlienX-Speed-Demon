@@ -425,4 +425,6 @@ H164 scored 65.398 points on run `run-0e251929474d`, below the author-reported b
 
 H142 was pushed as commit `1e0632050363f93262caef45d42b84f1b04c56a8` and scored 64.679018 points. The board reported T=0.0848 s, M=38,584,320 B, S=555, K=19.659857 (run `run-dc3e534c6b5b`). This is below the v7 best of 67.289394, so H142 is rejected. The active source is now H83, restored from `tools/track-a/work/h83-nine-parse-five-post/src/main.rs`; it uses 9 parse workers, 5 later-phase workers, and CRC32C hash plus avalanche. Its S is 558. It has passed the saved local full-hash, sample and fixture checks; no board score is claimed yet.
 
-| H83 | 9 parse/5 post workers; CRC32C plus avalanche | RUN-ID-TBD | COMMIT-TBD | TBD | Current board candidate; local checks recorded in candidate archive |
+| H83 | 9 parse/5 post workers; CRC32C plus avalanche | run-95ac2b92059b | 74c7df4534f2fa8b86367c9f884f5d6b70605c67 | T=0.082354 s / M=43,110,400 B / S=558 / K=19.496224 / 64.497525 pts | Rejected; all board gates passed, but below v7 |
+
+H83 completed successfully on the board (run `run-95ac2b92059b`): T=0.082354 s, M=43,110,400 B, S=558, K=19.496224, 64.497525 points. Restored v7 as the best-known source, SHA256 `2FD6CA6CFA5551C735C3A2D2D812D767D1334FA60570302F480D2E157960AE17`, S=526. The current best remains 67.289394 points; the 71-point target is unmet.

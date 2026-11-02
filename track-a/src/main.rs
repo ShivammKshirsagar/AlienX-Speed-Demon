@@ -1,70 +1,41 @@
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hash, Hasher};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::path::Path;
 use std::thread;
 
 const HOURS: usize = 72;
-const MAX_THREADS: usize = 9;
-const POST_PARSE_THREADS: usize = 5;
-const INITIAL_ECAP: usize = 2048;
+const MAX_THREADS: usize = 12;
 
 // A small, deterministic hasher is enough here: endpoint keys are short ASCII strings.
 #[derive(Default)]
 struct FastHasher(u64);
 
-#[cfg(not(target_arch = "x86_64"))]
-compile_error!("the pinned x86-64-v3 build requires x86_64");
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.2")]
-unsafe fn crc32c_update(mut crc: u32, bytes: &[u8]) -> u32 {
-    use std::arch::x86_64::{_mm_crc32_u64, _mm_crc32_u8};
-    if bytes.len() == 1 {
-        return _mm_crc32_u8(crc, bytes[0]);
-    }
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
-        let word = u64::from_ne_bytes(chunk.try_into().unwrap());
-        crc = _mm_crc32_u64(u64::from(crc), word) as u32;
-    }
-    for &byte in chunks.remainder() {
-        crc = _mm_crc32_u8(crc, byte);
-    }
-    crc
-}
-
 impl Hasher for FastHasher {
     fn write(&mut self, bytes: &[u8]) {
-        #[cfg(target_arch = "x86_64")]
-        let h = {
-            // SAFETY: the shipped Docker build targets x86-64-v3, which includes SSE4.2.
-            unsafe { crc32c_update(self.0 as u32, bytes) }
+        let mut h = if self.0 == 0 {
+            0xcbf29ce484222325
+        } else {
+            self.0
         };
-        self.0 = u64::from(h) ^ (bytes.len() as u64).rotate_left(17);
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            h = h.rotate_left(5) ^ u64::from_ne_bytes(chunk.try_into().unwrap());
+        }
+        let tail = chunks.remainder();
+        if !tail.is_empty() {
+            let mut last = [0; 8];
+            last[..tail.len()].copy_from_slice(tail);
+            h = h.rotate_left(5) ^ u64::from_ne_bytes(last);
+        }
+        self.0 = h ^ bytes.len() as u64;
     }
 
     fn finish(&self) -> u64 {
-        let mut h = (self.0 ^ (self.0 >> 32)) as u32;
-        h ^= h >> 16;
-        h = h.wrapping_mul(0x7feb352d);
-        h ^= h >> 15;
-        h = h.wrapping_mul(0x846ca68b);
-        h ^= h >> 16;
-        u64::from(h) * 0x0000000100000001
+        self.0
     }
 }
 
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
-
-#[derive(PartialEq, Eq)]
-struct Endpoint<'a>(&'a [u8]);
-
-impl Hash for Endpoint<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write(self.0);
-    }
-}
 
 struct Group {
     latencies: Vec<u32>,
@@ -88,11 +59,8 @@ impl Group {
 
 struct Local<'a> {
     endpoints: Vec<&'a [u8]>,
-    endpoint_ids: FastMap<Endpoint<'a>, usize>,
-    ecap: usize,
-    group_ids: Vec<u32>,
-    group_keys: Vec<u32>,
-    groups: Vec<Group>,
+    endpoint_ids: FastMap<&'a [u8], usize>,
+    groups: Vec<FastMap<usize, Group>>,
 }
 
 impl<'a> Local<'a> {
@@ -100,55 +68,18 @@ impl<'a> Local<'a> {
         Self {
             endpoints: Vec::new(),
             endpoint_ids: FastMap::default(),
-            ecap: INITIAL_ECAP,
-            group_ids: vec![u32::MAX; HOURS * INITIAL_ECAP],
-            group_keys: Vec::new(),
-            groups: Vec::new(),
+            groups: (0..HOURS).map(|_| FastMap::default()).collect(),
         }
-    }
-
-    fn grow_ecap(&mut self) {
-        let old = self.ecap;
-        let new = old.checked_mul(2).expect("too many endpoint IDs");
-        let mut group_ids = vec![u32::MAX; HOURS * new];
-        for hour in 0..HOURS {
-            group_ids[hour * new..hour * new + old]
-                .copy_from_slice(&self.group_ids[hour * old..(hour + 1) * old]);
-        }
-        for key in &mut self.group_keys {
-            let slot = *key as usize;
-            *key = u32::try_from((slot / old) * new + slot % old).expect("group index exceeds u32");
-        }
-        self.group_ids = group_ids;
-        self.ecap = new;
-    }
-
-    fn group_mut(&mut self, hour: usize, endpoint_id: usize) -> &mut Group {
-        let slot = hour * self.ecap + endpoint_id;
-        let mut group_id = self.group_ids[slot];
-        if group_id == u32::MAX {
-            group_id = u32::try_from(self.groups.len()).expect("too many groups");
-            self.group_ids[slot] = group_id;
-            self.group_keys
-                .push(u32::try_from(slot).expect("group index exceeds u32"));
-            self.groups.push(Group::new());
-        }
-        &mut self.groups[group_id as usize]
     }
 
     fn endpoint_id(&mut self, bytes: &'a [u8]) -> usize {
+        if let Some(&id) = self.endpoint_ids.get(bytes) {
+            return id;
+        }
         let id = self.endpoints.len();
-        if id == self.ecap {
-            self.grow_ecap();
-        }
-        match self.endpoint_ids.entry(Endpoint(bytes)) {
-            Entry::Occupied(entry) => *entry.get(),
-            Entry::Vacant(entry) => {
-                entry.insert(id);
-                self.endpoints.push(bytes);
-                id
-            }
-        }
+        self.endpoint_ids.insert(bytes, id);
+        self.endpoints.push(bytes);
+        id
     }
 }
 
@@ -156,84 +87,77 @@ fn hour_index(ts: &[u8]) -> usize {
     let month = (ts[5] - b'0') * 10 + (ts[6] - b'0');
     let day = (ts[8] - b'0') * 10 + (ts[9] - b'0');
     let hour = (ts[11] - b'0') * 10 + (ts[12] - b'0');
-    let day_offset = (month - 10) * 31 + day - 30;
-    usize::from(day_offset) * 24 + usize::from(hour) - 18
-}
-
-fn parse_four(bytes: &[u8]) -> u32 {
-    let digits = u32::from_le_bytes(bytes[..4].try_into().unwrap()) - 0x30303030;
-    let pairs = (digits & 0x00ff00ff) * 10 + ((digits >> 8) & 0x00ff00ff);
-    (pairs & 0xffff) * 100 + (pairs >> 16)
+    let day = usize::from(month - 10) * 31 + usize::from(day) - 30;
+    day * 24 + usize::from(hour) - 18
 }
 
 fn parse_uint(bytes: &[u8]) -> u32 {
-    let (mut value, offset) = if bytes.len() >= 8 {
-        (
-            parse_four(&bytes[..4]) * 10_000 + parse_four(&bytes[4..8]),
-            8,
-        )
-    } else if bytes.len() >= 4 {
-        (parse_four(bytes), 4)
-    } else {
-        (0, 0)
-    };
-    for &byte in &bytes[offset..] {
-        value = value * 10 + u32::from(byte - b'0');
-    }
-    value
+    bytes
+        .iter()
+        .fold(0u32, |n, &b| n * 10 + u32::from(b - b'0'))
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
     use std::arch::x86_64::*;
-    let (mut p, mut first, mut second, mut found) = (28, 0, 0, 0);
+    let (mut p, mut a, mut b, mut n) = (28, 0, 0, 0);
     while p + 32 <= line.len() {
         // SAFETY: the loop condition guarantees a full readable vector.
-        let chunk = unsafe { _mm256_loadu_si256(line.as_ptr().add(p).cast()) };
-        let spaces =
-            _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b' ' as i8))) as u32;
-        let newlines =
-            _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'\n' as i8))) as u32;
-        let stop = if newlines == 0 {
+        let x = unsafe { _mm256_loadu_si256(line.as_ptr().add(p).cast()) };
+        let s = _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, _mm256_set1_epi8(b' ' as i8))) as u32;
+        let e = _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, _mm256_set1_epi8(b'\n' as i8))) as u32;
+        let stop = if e == 0 {
             32
         } else {
-            newlines.trailing_zeros() as usize
+            e.trailing_zeros() as usize
         };
-        let mut mask = spaces
-            & if stop == 32 {
-                u32::MAX
+        let mut m = s & if stop == 32 {
+            u32::MAX
+        } else {
+            (1 << stop) - 1
+        };
+        while m != 0 && n < 2 {
+            let q = p + m.trailing_zeros() as usize;
+            if n == 0 {
+                a = q
             } else {
-                (1 << stop) - 1
-            };
-        if mask != 0 && found == 0 {
-            first = p + mask.trailing_zeros() as usize;
-            found = 1;
-            mask &= mask - 1;
+                b = q
+            }
+            n += 1;
+            m &= m - 1;
         }
-        if mask != 0 && found == 1 {
-            second = p + mask.trailing_zeros() as usize;
-            found = 2;
-        }
-        if newlines != 0 {
-            return (p + stop, first, second);
+        if e != 0 {
+            return (p + stop, a, b);
         }
         p += 32;
     }
-    for at in p..line.len() {
-        if line[at] == b'\n' {
-            return (at, first, second);
+    for i in p..line.len() {
+        if line[i] == b'\n' {
+            return (i, a, b);
         }
-        if line[at] == b' ' && found < 2 {
-            if found == 0 {
-                first = at;
+        if line[i] == b' ' && n < 2 {
+            if n == 0 {
+                a = i
             } else {
-                second = at;
+                b = i
             }
-            found += 1;
+            n += 1;
         }
     }
-    (line.len(), first, second)
+    (line.len(), a, b)
+}
+fn parse_uint_swar(bytes: &[u8]) -> u32 {
+    if bytes.len() != 8 {
+        return parse_uint(bytes);
+    }
+    // SAFETY: exactly eight token bytes are readable; converting from LE fixes byte order.
+    let word = u64::from_le(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast()) });
+    let mut value = 0u32;
+    for shift in 0..8 {
+        value = value * 10 + ((word >> (shift * 8)) as u8 - b'0') as u32;
+    }
+    value
 }
 
 fn parse_range<'a>(data: &'a [u8], start: usize, end: usize) -> Local<'a> {
@@ -245,10 +169,8 @@ fn parse_range<'a>(data: &'a [u8], start: usize, end: usize) -> Local<'a> {
 }
 
 fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local<'a>) {
-    let mut previous_hour_key = u64::MAX;
-    let mut previous_hour = 0;
     while *pos < end {
-        // SAFETY: the release target uses x86-64-v3, and the scanner guards every vector load.
+        // SAFETY: the pinned release target supports AVX2 and the scanner guards every load.
         let (line_len, field, endpoint_end) = unsafe { find_line_fields_avx2(&data[*pos..end]) };
         let line_end = *pos + line_len;
         let line = &data[*pos..line_end];
@@ -256,16 +178,17 @@ fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local
         let status_start = endpoint_end + 1;
         let latency_start = status_start + 4;
         let endpoint = &line[endpoint_start..endpoint_end];
-        let hour_key = u64::from_le_bytes(line[5..13].try_into().unwrap());
-        if hour_key != previous_hour_key {
-            previous_hour_key = hour_key;
-            previous_hour = hour_index(line);
-        }
-        let hour = previous_hour;
+        let hour = hour_index(line);
         let endpoint_id = local.endpoint_id(endpoint);
-        let group = local.group_mut(hour, endpoint_id);
-        group.latencies.push(parse_uint(&line[latency_start..]));
-        group.errors += u32::from(line[status_start] == b'5');
+        let group = local.groups[hour]
+            .entry(endpoint_id)
+            .or_insert_with(Group::new);
+        group
+            .latencies
+            .push(parse_uint_swar(&line[latency_start..]));
+        if line[status_start] == b'5' {
+            group.errors += 1;
+        }
         *pos = line_end + 1;
     }
 }
@@ -435,66 +358,85 @@ fn main() {
             .collect::<Vec<_>>()
     });
 
-    let workers = workers.min(POST_PARSE_THREADS);
     let mut global_ids: FastMap<&[u8], usize> = FastMap::default();
     let mut endpoints: Vec<&[u8]> = Vec::new();
     let mut remaps = Vec::with_capacity(locals.len());
     for local in &mut locals {
         let mut remap = Vec::with_capacity(local.endpoints.len());
         for endpoint in local.endpoints.drain(..) {
-            let id = match global_ids.entry(endpoint) {
-                Entry::Occupied(entry) => *entry.get(),
-                Entry::Vacant(entry) => {
-                    let id = endpoints.len();
-                    entry.insert(id);
-                    endpoints.push(endpoint);
-                    id
-                }
+            let id = if let Some(&id) = global_ids.get(endpoint) {
+                id
+            } else {
+                let id = endpoints.len();
+                global_ids.insert(endpoint, id);
+                endpoints.push(endpoint);
+                id
             };
             remap.push(id);
         }
         remaps.push(remap);
     }
 
-    let range_size = HOURS.div_ceil(workers);
-    let ranges: Vec<_> = (0..HOURS)
-        .step_by(range_size)
-        .map(|start| start..(start + range_size).min(HOURS))
+    let hour_weights: Vec<usize> = (0..HOURS)
+        .map(|hour| {
+            locals
+                .iter()
+                .map(|local| {
+                    local.groups[hour]
+                        .values()
+                        .map(|group| group.latencies.len())
+                        .sum::<usize>()
+                })
+                .sum()
+        })
         .collect();
+    let target_hour_work = hour_weights.iter().sum::<usize>().div_ceil(workers).max(1);
+    let mut ranges = Vec::with_capacity(workers);
+    let (mut start_hour, mut hour_work) = (0, 0);
+    for (hour, &weight) in hour_weights.iter().enumerate() {
+        hour_work += weight;
+        if hour_work >= target_hour_work && ranges.len() + 1 < workers {
+            ranges.push(start_hour..hour + 1);
+            start_hour = hour + 1;
+            hour_work = 0;
+        }
+    }
+    if start_hour < HOURS || ranges.is_empty() {
+        ranges.push(start_hour..HOURS);
+    }
+
+    let mut range_jobs: Vec<Vec<(Vec<usize>, Vec<FastMap<usize, Group>>)>> = (0..ranges.len())
+        .map(|_| Vec::with_capacity(locals.len()))
+        .collect();
+    for (local, remap) in locals.into_iter().zip(remaps) {
+        let mut hour_maps = local.groups.into_iter();
+        for (range, jobs) in ranges.iter().zip(&mut range_jobs) {
+            let maps = hour_maps.by_ref().take(range.len()).collect();
+            jobs.push((remap.clone(), maps));
+        }
+    }
 
     let endpoint_count = endpoints.len();
-    let mut hour_to_range = vec![0usize; HOURS];
-    for (index, range) in ranges.iter().enumerate() {
-        for hour in range.clone() {
-            hour_to_range[hour] = index;
-        }
-    }
-    let mut range_jobs: Vec<Vec<(usize, Group)>> = (0..ranges.len()).map(|_| Vec::new()).collect();
-    for (local, remap) in locals.into_iter().zip(remaps) {
-        for (key, group) in local.group_keys.into_iter().zip(local.groups) {
-            let key = key as usize;
-            let hour = key / local.ecap;
-            let endpoint = key % local.ecap;
-            let range_index = hour_to_range[hour];
-            let local_index = (hour - ranges[range_index].start) * endpoint_count + remap[endpoint];
-            range_jobs[range_index].push((local_index, group));
-        }
-    }
-
     let mut groups: Vec<Group> = (0..endpoint_count * HOURS).map(|_| Group::new()).collect();
     thread::scope(|scope| {
         let mut remaining = groups.as_mut_slice();
-        for (range, jobs) in ranges.into_iter().zip(range_jobs) {
+        for (range, sources) in ranges.into_iter().zip(range_jobs) {
             let (destination, tail) = remaining.split_at_mut(range.len() * endpoint_count);
             remaining = tail;
             scope.spawn(move || {
-                for (index, mut partial) in jobs {
-                    if destination[index].latencies.is_empty() {
-                        destination[index].latencies = std::mem::take(&mut partial.latencies);
-                    } else {
-                        destination[index].latencies.append(&mut partial.latencies);
+                for (remap, hour_maps) in sources {
+                    for (hour_offset, groups) in hour_maps.into_iter().enumerate() {
+                        for (local_endpoint, mut partial) in groups {
+                            let index = hour_offset * endpoint_count + remap[local_endpoint];
+                            if destination[index].latencies.is_empty() {
+                                destination[index].latencies =
+                                    std::mem::take(&mut partial.latencies);
+                            } else {
+                                destination[index].latencies.append(&mut partial.latencies);
+                            }
+                            destination[index].errors += partial.errors;
+                        }
                     }
-                    destination[index].errors += partial.errors;
                 }
             });
         }
@@ -583,16 +525,36 @@ fn main() {
     if let Some(parent) = Path::new(&output).parent() {
         std::fs::create_dir_all(parent).expect("create output directory");
     }
-    let mut file = std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .open(output)
         .expect("open output");
-    use std::io::Write;
-    for buffer in output_buffers {
-        file.write_all(&buffer).expect("write output range");
+    let total_size = output_buffers.iter().map(Vec::len).sum::<usize>();
+    file.set_len(total_size as u64).expect("size output");
+    let mut offset = 0u64;
+    let offsets = output_buffers
+        .iter()
+        .map(|buffer| {
+            let start = offset;
+            offset += buffer.len() as u64;
+            start
+        })
+        .collect::<Vec<_>>();
+    use std::os::unix::fs::FileExt;
+    thread::scope(|scope| {
+        for (buffer, offset) in output_buffers.into_iter().zip(offsets) {
+            let file = &file;
+            scope.spawn(move || {
+                file.write_all_at(&buffer, offset)
+                    .expect("write output range");
+            });
+        }
+    });
+    unsafe extern "C" {
+        fn _exit(status: i32) -> !;
     }
-    drop(mapping);
-    std::process::exit(0);
+    // SAFETY: output workers have joined and no destructor is needed after the write.
+    unsafe { _exit(0) }
 }
