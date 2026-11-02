@@ -487,4 +487,8 @@ H189 board result: run-aded64840da9 scored T=0.060009 s, M=46,718,976 B, S=570, 
 
 H190 board result: run-74b711209003 scored T=0.054888 s, M=46,477,312 B, S=566, K=23.474428, 68.529751 points. The one-block scanner cut eight S lines but did not improve time; restored H184.
 
-| H191 | Parse common 4- and 5-digit latency fields from one packed u32 load with fixed decimal weights, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |
+| H191 | Parse common 4- and 5-digit latency fields from one packed u32 load with fixed decimal weights, atop H184 | run-7d38c5531254 | aa6f883db22122f43f9b40fc1a020f84a13c9155 | T=0.054760 s / M=46,125,056 B / S=587 / K=23.409362 / 68.469479 pts | Docker seed-1 hash and worked example passed | Rejected below H184. |
+
+H191 board result: run-7d38c5531254 scored T=0.054760 s, M=46,125,056 B, S=587, K=23.409362, 68.469479 points. Fixed-width 4- and 5-digit parsing did not improve the board score; restored H184.
+
+| H192 | Force inline `push_uint`, the decimal output formatter, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |

@@ -204,20 +204,6 @@ unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
 }
 
 fn parse_uint_swar(bytes: &[u8]) -> u32 {
-    if bytes.len() == 4 || bytes.len() == 5 {
-        // Fixed weights avoid a loop for the common four- and five-digit latencies.
-        let word = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-        let d0 = (word as u8 - b'0') as u32;
-        let d1 = ((word >> 8) as u8 - b'0') as u32;
-        let d2 = ((word >> 16) as u8 - b'0') as u32;
-        let d3 = ((word >> 24) as u8 - b'0') as u32;
-        let value = d0 * 1000 + d1 * 100 + d2 * 10 + d3;
-        return if bytes.len() == 5 {
-            value * 10 + u32::from(bytes[4] - b'0')
-        } else {
-            value
-        };
-    }
     if bytes.len() != 8 {
         return parse_uint(bytes);
     }
@@ -340,6 +326,7 @@ fn hour_strings() -> Vec<[u8; 20]> {
         .collect()
 }
 
+#[inline(always)]
 fn push_uint(out: &mut Vec<u8>, mut n: u64) {
     let mut digits = [0u8; 20];
     let mut at = digits.len();
