@@ -1,6 +1,6 @@
 # Track A board variants
 
-Each delivered folder is a complete offline Docker build context derived independently from `baseline-snapshot2`. Base source SHA-256: `71cf21e17af0ff9b2e672943c3444c346ba5915f493dee68f8424820a59a2157`. The original restored baseline matched that source; the current `track-a/src/main.rs` is v7, SHA-256 `2fd6ca6cfa5551c735c3a2d2d812d767d1334fa60570302f480d2e157960ae17`. Base board S is 497; variant S estimates add the measured source-code line delta. RSS proxy is Docker Linux `VmHWM` minus the 238,836,234-byte input mapping; base proxy was 42,498 KB. All delivered variants were built offline and passed all 12 checks: worked example, empty, single line, chunk boundaries with 12 CPUs, equal timestamps, hour boundaries, 5,000 endpoints, sample seeds 2/3/7, full seed 2 vs reference, and the full seed 1 expected hash.
+Each variant is a complete offline Docker build context derived from `baseline-snapshot2`. Base source SHA-256: `71cf21e17af0ff9b2e672943c3444c346ba5915f493dee68f8424820a59a2157`. The current `track-a/src/main.rs` is v8, SHA-256 `2b7e24f7ea9d4c340f0bc2db197fe116c3f38482f76a97175aab8c0a877c2168`. Variants v1-v7 passed the documented checks individually; v8 combines v7 and v5. Its combined build/test is pending because WSL could not start (`E_ACCESSDENIED`). Do not treat v8 as validated until the board build succeeds. No timing claim is made.
 
 | Variant | Change | Rust + Docker S estimate | Max RSS proxy | Checks | Exact push procedure |
 |---|---|---:|---:|---|---|
@@ -11,5 +11,6 @@ Each delivered folder is a complete offline Docker build context derived indepen
 | v5 | Trivial n=1, sort through 48, exact `select_nth_unstable` ranks above 48 | 512 | 42,062 KB | 12/12 passed | Copy all contents of `tools/track-a/variants/v5/` over `track-a/`, replacing files; commit **Partial selection**. |
 | v6 | 48 newline-aligned chunks with an atomic worker queue | 519 | 49,634 KB | 12/12 passed; **excluded** | Do not push: proxy exceeded base by 7,136 KB. |
 | v7 | v1 exit path + v2 fast parser, bundled as one board candidate | 526 | 42,022 KB | 12/12 passed | Copy all contents of `tools/track-a/variants/v7/` over `track-a/`, replacing files; commit **Fast parse exit**. |
+| v8 | v7 plus v5 exact percentile selection | Not measured | Not measured | Combined build/test pending | Current `track-a/` is v8; after validation commit **Fast Percentiles**. |
 
 v6 passed correctness but failed the required at-or-below-base memory limit, so it is not included as a pushable `v6/` folder. v7 combines two previously isolated changes because the parse optimization targets the measured dominant phase and the exit change adds no second scan. v7 retained the pinned Docker `FROM` lines and `RUSTFLAGS`; no local timing result was used to choose it. Its memory proxy is one full seed-1 Docker process high-water sample minus the 238,836,234-byte input mapping. Use paired board runs as the final judge.

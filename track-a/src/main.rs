@@ -470,11 +470,26 @@ fn main() {
             remaining = tail;
             scope.spawn(move || {
                 for group in slice.iter_mut().filter(|g| !g.latencies.is_empty()) {
-                    group.latencies.sort_unstable();
                     let n = group.latencies.len();
-                    group.p50 = group.latencies[(50 * n + 99) / 100 - 1];
-                    group.p95 = group.latencies[(95 * n + 99) / 100 - 1];
-                    group.p99 = group.latencies[(99 * n + 99) / 100 - 1];
+                    if n == 1 {
+                        group.p50 = group.latencies[0];
+                        group.p95 = group.p50;
+                        group.p99 = group.p50;
+                    } else if n <= 48 {
+                        group.latencies.sort_unstable();
+                        group.p50 = group.latencies[(50 * n + 99) / 100 - 1];
+                        group.p95 = group.latencies[(95 * n + 99) / 100 - 1];
+                        group.p99 = group.latencies[(99 * n + 99) / 100 - 1];
+                    } else {
+                        let r99 = (99 * n + 99) / 100 - 1;
+                        let (left99, p99, _) = group.latencies.select_nth_unstable(r99);
+                        group.p99 = *p99;
+                        let r95 = (95 * n + 99) / 100 - 1;
+                        let (left95, p95, _) = left99.select_nth_unstable(r95);
+                        group.p95 = *p95;
+                        let r50 = (50 * n + 99) / 100 - 1;
+                        group.p50 = *left95.select_nth_unstable(r50).1;
+                    }
                 }
             });
         }
