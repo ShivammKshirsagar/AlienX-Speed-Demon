@@ -407,15 +407,16 @@ H164 scored 65.398 points on run `run-0e251929474d`, below the author-reported b
 |---|---|---|---|
 | b4d1b99 baseline (restored locally) | RUN-ID-TBD | Prior result: T=0.066 s / M=47 MB / S=497 / K=21.85 / 66.975 pts | b4d1b99 |
 
-## 70-point target iteration
+## 71-point target iteration
 
 | Candidate | Change | Board run ID | Board T / M / S / K | Result |
 |---|---|---|---|---|
 | v4 | Per-worker latency arena | RUN-ID-TBD | Points 62.753; T/M/S/K not supplied | Rejected; below baseline 66.975 |
-| v2 | Arithmetic/SWAR/AVX2 line parser | RUN-ID-TBD | Points 66.987; T/M/S/K not supplied | Best known so far; below target 70 |
+| v2 | Arithmetic/SWAR/AVX2 line parser | RUN-ID-TBD | Points 66.987; T/M/S/K not supplied | Below target 71 |
 | v5 | Partial percentile selection | RUN-ID-TBD | Points 66.661; T/M/S/K not supplied | Rejected; below best 66.987 |
 | v3 | Open-address endpoint lookup | RUN-ID-TBD | Points 66.506; T/M/S/K not supplied | Rejected; below best 66.987 |
-| v1 | `_exit(0)` after output | RUN-ID-TBD | Points 67.034; T/M/S/K not supplied | Best known so far; below target 70 |
-| v7 | v1 exit path plus v2 parser | RUN-ID-TBD | Points 67.289; T/M/S/K not supplied | Best known so far; below target 70 |
-| v8 | v7 plus v5 percentile selection | RUN-ID-TBD | Points 67.105; T/M/S/K not supplied | Rejected; below v7 67.289 |
-| c3 | Shared-mapped output with positioned-write fallback | RUN-ID-TBD | TBD | Prepared from existing candidate; awaiting board build and score |
+| v1 | `_exit(0)` after output | RUN-ID-TBD | Points 67.034; T/M/S/K not supplied | Below target 71 |
+| v7 | v1 exit path plus v2 parser | run-eefcfa8a21c2 | T=0.062314 s / M=47,575,040 B / S=526 / K=22.171133 / 67.289394 pts | Best known so far; below target 71 |
+| v8 | v7 plus v5 percentile selection | run-40f20faa186c | T=0.063016 s / M=47,259,648 B / S=541 / K=21.983725 / 67.105065 pts | Rejected; below v7 67.289 |
+| c3 | Shared-mapped output with positioned-write fallback | RUN-ID-TBD | Points 62.596; T/M/S/K not supplied | Rejected; below v7 67.289 |
+| H142 | Compact group index, 7 parse/5 post workers, huge-page hint | RUN-ID-TBD | TBD | Prepared from prior full-checked source; board result pending |
