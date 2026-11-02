@@ -59,4 +59,6 @@ Do not fill run IDs or board metrics from local measurements. v7 (parser plus ex
 
 | H192 force-inline output formatter | a789d951a46f3abdd602a09f7ab75fa50b5fdef4 | run-9559d5e4b4e2 | 0.074997 s | 46,514,176 B | 575 | 20.031580 | 65.085760 points; correctness passed, rejected below H184 |
 
+| H193 endpoint Vec reserve | a96a89695970f883002f2dc4b0319f12a839deca | run-7c71f97384e7 | 0.076639 s | 46,415,872 B | 574 | 19.829392 | 64.865470 points; correctness passed, rejected below H184 |
+
 | H184 integer group-key hash | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Specializes eight-byte group-key hashing; full Docker check pending. |

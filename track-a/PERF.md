@@ -495,4 +495,8 @@ H191 board result: run-7d38c5531254 scored T=0.054760 s, M=46,125,056 B, S=587, 
 
 H192 board result: run-9559d5e4b4e2 scored T=0.074997 s, M=46,514,176 B, S=575, K=20.031580, 65.085760 points. Forcing `push_uint` inline bloated the hot path and regressed time; restored H184.
 
-| H193 | Reserve 8,192 endpoint slices in each parser worker, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |
+| H193 | Reserve 8,192 endpoint slices in each parser worker, atop H184 | run-7c71f97384e7 | a96a89695970f883002f2dc4b0319f12a839deca | T=0.076639 s / M=46,415,872 B / S=574 / K=19.829392 / 64.865470 pts | Docker seed-1 hash and worked example passed | Rejected; reservation regressed wall time heavily. Restored H184. |
+
+H193 board result: run-7c71f97384e7 scored T=0.076639 s, M=46,415,872 B, S=574, K=19.829392, 64.865470 points. The per-worker endpoint reservation regressed; restored H184.
+
+| H194 | Accumulate status-5 errors with a boolean-to-u32 addition instead of a branch, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |

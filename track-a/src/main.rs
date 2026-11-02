@@ -112,8 +112,7 @@ struct Local<'a> {
 impl<'a> Local<'a> {
     fn new() -> Self {
         Self {
-            // Reserve for the common worker-local endpoint count; Vec still grows if needed.
-            endpoints: Vec::with_capacity(8192),
+            endpoints: Vec::new(),
             endpoint_ids: FastMap::default(),
             groups: (0..HOURS).map(|_| FastMap::default()).collect(),
         }
@@ -243,9 +242,7 @@ fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local
         group
             .latencies
             .push(parse_uint_swar(&line[latency_start..]));
-        if line[status_start] == b'5' {
-            group.errors += 1;
-        }
+        group.errors += u32::from(line[status_start] == b'5');
         *pos = line_end + 1;
     }
 }
