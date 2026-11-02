@@ -459,4 +459,8 @@ H182 board result: run-5643c5c53bec scored T=0.061457 s, M=47,566,848 B, S=541, 
 
 H183 board result: run-23f2062c4422 scored T=0.054407 s, M=46,309,376 B, S=570, K=23.570131, 68.618100 points. Cached endpoint fingerprints reduced repeated key hashing while preserving full-byte equality; full seed-1 hash passed. This is the current best, still below 71.
 
-| H184 | Multiply-mix 64-bit group IDs in FastHasher, atop H183 | RUN-ID-TBD | COMMIT-TBD | TBD | Not measured locally; full Docker check pending | Pending board result |
+| H184 | Multiply-mix 64-bit group IDs in FastHasher, atop H183 | run-590815088b72 | 184487c11bd7d4815ebb97b4ebf4a189631ddc03 | T=0.054007 s / M=46,202,880 B / S=574 / K=23.643337 / 68.685439 pts | Docker seed-1 hash passed | Kept; current best, target 71 remains unmet. |
+
+H184 board result: run-590815088b72 scored T=0.054007 s, M=46,202,880 B, S=574, K=23.643337, 68.685439 points. The eight-byte group-key multiply mix is retained as the active best; the 71-point target remains unmet.
+
+| H185 | Inline up to three latencies per group before spilling to Vec, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Docker full seed-1 hash passed; local timing not used | Pending board score |

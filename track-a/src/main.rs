@@ -85,6 +85,8 @@ impl Hash for Endpoint<'_> {
 
 struct Group {
     latencies: Vec<u32>,
+    inline: [u32; 3],
+    inline_len: u8,
     errors: u32,
     p50: u32,
     p95: u32,
@@ -95,10 +97,75 @@ impl Group {
     fn new() -> Self {
         Self {
             latencies: Vec::new(),
+            inline: [0; 3],
+            inline_len: 0,
             errors: 0,
             p50: 0,
             p95: 0,
             p99: 0,
+        }
+    }
+
+    // Keep the common small groups inline; spill exactly when a fourth sample arrives.
+    fn push_latency(&mut self, value: u32) {
+        if self.latencies.is_empty() && self.inline_len < self.inline.len() as u8 {
+            self.inline[usize::from(self.inline_len)] = value;
+            self.inline_len += 1;
+        } else {
+            if self.latencies.is_empty() {
+                self.latencies.reserve(8);
+                self.latencies.extend_from_slice(&self.inline);
+            }
+            self.latencies.push(value);
+        }
+    }
+
+    fn count(&self) -> usize {
+        if self.latencies.is_empty() {
+            usize::from(self.inline_len)
+        } else {
+            self.latencies.len()
+        }
+    }
+
+    fn merge_from(&mut self, other: &mut Self) {
+        if self.latencies.is_empty() && other.latencies.is_empty() {
+            for &value in &other.inline[..usize::from(other.inline_len)] {
+                self.push_latency(value);
+            }
+        } else {
+            if self.latencies.is_empty() {
+                self.latencies
+                    .reserve(usize::from(self.inline_len) + other.count());
+                self.latencies
+                    .extend_from_slice(&self.inline[..usize::from(self.inline_len)]);
+            }
+            if other.latencies.is_empty() {
+                self.latencies
+                    .extend_from_slice(&other.inline[..usize::from(other.inline_len)]);
+            } else {
+                self.latencies.append(&mut other.latencies);
+            }
+        }
+        self.errors += other.errors;
+    }
+
+    fn finish(&mut self) {
+        if self.latencies.is_empty() {
+            let values = &mut self.inline[..usize::from(self.inline_len)];
+            values.sort_unstable();
+            let n = values.len();
+            if n != 0 {
+                self.p50 = values[(50 * n + 99) / 100 - 1];
+                self.p95 = values[(95 * n + 99) / 100 - 1];
+                self.p99 = values[(99 * n + 99) / 100 - 1];
+            }
+        } else {
+            self.latencies.sort_unstable();
+            let n = self.latencies.len();
+            self.p50 = self.latencies[(50 * n + 99) / 100 - 1];
+            self.p95 = self.latencies[(95 * n + 99) / 100 - 1];
+            self.p99 = self.latencies[(99 * n + 99) / 100 - 1];
         }
     }
 }
@@ -239,9 +306,7 @@ fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local
         let group = local.groups[hour]
             .entry(endpoint_id)
             .or_insert_with(Group::new);
-        group
-            .latencies
-            .push(parse_uint_swar(&line[latency_start..]));
+        group.push_latency(parse_uint_swar(&line[latency_start..]));
         if line[status_start] == b'5' {
             group.errors += 1;
         }
@@ -352,14 +417,14 @@ fn format_hours(
     for hour in range {
         for &endpoint in order {
             let group = &groups[hour * endpoints.len() + endpoint];
-            if group.latencies.is_empty() {
+            if group.count() == 0 {
                 continue;
             }
             out.extend_from_slice(&hours[hour]);
             out.push(b' ');
             out.extend_from_slice(endpoints[endpoint]);
             out.push(b' ');
-            let count = group.latencies.len() as u64;
+            let count = group.count() as u64;
             push_uint(&mut out, count);
             out.push(b' ');
             push_uint(&mut out, u64::from(group.p50));
@@ -437,12 +502,7 @@ fn main() {
         .map(|hour| {
             locals
                 .iter()
-                .map(|local| {
-                    local.groups[hour]
-                        .values()
-                        .map(|group| group.latencies.len())
-                        .sum::<usize>()
-                })
+                .map(|local| local.groups[hour].values().map(Group::count).sum::<usize>())
                 .sum()
         })
         .collect();
@@ -484,13 +544,7 @@ fn main() {
                     for (hour_offset, groups) in hour_maps.into_iter().enumerate() {
                         for (local_endpoint, mut partial) in groups {
                             let index = hour_offset * endpoint_count + remap[local_endpoint];
-                            if destination[index].latencies.is_empty() {
-                                destination[index].latencies =
-                                    std::mem::take(&mut partial.latencies);
-                            } else {
-                                destination[index].latencies.append(&mut partial.latencies);
-                            }
-                            destination[index].errors += partial.errors;
+                            destination[index].merge_from(&mut partial);
                         }
                     }
                 }
@@ -501,14 +555,14 @@ fn main() {
     // Independent groups sort in parallel; sorting all values gives the three exact ranks.
     let target_work = groups
         .iter()
-        .map(|group| group.latencies.len())
+        .map(Group::count)
         .sum::<usize>()
         .div_ceil(workers)
         .max(1);
     let mut ranges = Vec::with_capacity(workers);
     let (mut start, mut work) = (0, 0);
     for (index, group) in groups.iter().enumerate() {
-        work += group.latencies.len();
+        work += group.count();
         if work >= target_work && ranges.len() + 1 < workers && index + 1 < groups.len() {
             ranges.push(start..index + 1);
             start = index + 1;
@@ -525,12 +579,8 @@ fn main() {
             let (slice, tail) = remaining.split_at_mut(range.len());
             remaining = tail;
             scope.spawn(move || {
-                for group in slice.iter_mut().filter(|g| !g.latencies.is_empty()) {
-                    group.latencies.sort_unstable();
-                    let n = group.latencies.len();
-                    group.p50 = group.latencies[(50 * n + 99) / 100 - 1];
-                    group.p95 = group.latencies[(95 * n + 99) / 100 - 1];
-                    group.p99 = group.latencies[(99 * n + 99) / 100 - 1];
+                for group in slice.iter_mut().filter(|g| g.count() != 0) {
+                    group.finish();
                 }
             });
         }
@@ -543,7 +593,7 @@ fn main() {
     for hour in 0..HOURS {
         for &endpoint in &order {
             let group = &groups[hour * endpoints.len() + endpoint];
-            if !group.latencies.is_empty() {
+            if group.count() != 0 {
                 hour_sizes[hour] += endpoints[endpoint].len() + 48;
             }
         }
