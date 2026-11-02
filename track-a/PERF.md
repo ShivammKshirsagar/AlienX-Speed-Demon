@@ -475,4 +475,8 @@ H186 board result: run-6f3fc7b14c3a scored T=0.058531 s, M=56,606,720 B, S=542, 
 
 H187 board result: run-7ece9888b7cf scored T=0.056983 s, M=51,863,552 B, S=551, K=22.630104, 67.734327 points. Flat-vector merging improved over H186 but remained below H184; restored H184.
 
-| H188 | Cache exact last endpoint ID per parser worker to skip repeated endpoint-map probes, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |
+| H188 | Cache exact last endpoint ID per parser worker to skip repeated endpoint-map probes, atop H184 | run-7008c4a3e7b5 | 1929ececd90d33150d3e9c2f272ae36b5ce8bfd6 | T=0.054670 s / M=46,366,720 B / S=584 / K=23.422144 / 68.481333 pts | Docker seed-1 hash and worked example passed | Rejected below H184. |
+
+H188 board result: run-7008c4a3e7b5 scored T=0.054670 s, M=46,366,720 B, S=584, K=23.422144, 68.481333 points. The endpoint cache was slightly below H184; reverted.
+
+| H189 | Remove one multiply and two xor-shifts from endpoint fingerprint finalization, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |

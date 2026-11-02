@@ -62,11 +62,8 @@ fn endpoint_hash(bytes: &[u8]) -> u64 {
     } else {
         first
     };
-    let mut h =
-        first ^ last.rotate_left(23) ^ (bytes.len() as u64).wrapping_mul(0x9e3779b185ebca87);
-    h ^= h >> 33;
-    h = h.wrapping_mul(0xff51afd7ed558ccd);
-    h ^ (h >> 33)
+    // Full endpoint bytes are still compared on collisions, so this fingerprint only selects buckets.
+    first ^ last.rotate_left(23) ^ (bytes.len() as u64).wrapping_mul(0x9e3779b185ebca87)
 }
 
 impl PartialEq for Endpoint<'_> {
@@ -106,7 +103,6 @@ impl Group {
 struct Local<'a> {
     endpoints: Vec<&'a [u8]>,
     endpoint_ids: FastMap<Endpoint<'a>, usize>,
-    last_endpoint: Option<usize>,
     groups: Vec<FastMap<usize, Group>>,
 }
 
@@ -115,27 +111,18 @@ impl<'a> Local<'a> {
         Self {
             endpoints: Vec::new(),
             endpoint_ids: FastMap::default(),
-            last_endpoint: None,
             groups: (0..HOURS).map(|_| FastMap::default()).collect(),
         }
     }
 
     fn endpoint_id(&mut self, bytes: &'a [u8]) -> usize {
-        if let Some(id) = self.last_endpoint {
-            if self.endpoints[id] == bytes {
-                return id;
-            }
-        }
         let key = Endpoint(bytes, endpoint_hash(bytes));
-        let id = if let Some(&id) = self.endpoint_ids.get(&key) {
-            id
-        } else {
-            let id = self.endpoints.len();
-            self.endpoint_ids.insert(key, id);
-            self.endpoints.push(bytes);
-            id
-        };
-        self.last_endpoint = Some(id);
+        if let Some(&id) = self.endpoint_ids.get(&key) {
+            return id;
+        }
+        let id = self.endpoints.len();
+        self.endpoint_ids.insert(key, id);
+        self.endpoints.push(bytes);
         id
     }
 }
