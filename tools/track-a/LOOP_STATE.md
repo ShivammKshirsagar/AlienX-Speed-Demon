@@ -19,3 +19,5 @@
 - Priority clarification: the active milestone is strictly 70 real-board points. The 80-point goal is deferred and must not be resumed until a board result of at least 70 points is recorded. No board/scoreboard integration is available in this workspace; v4 is awaiting its board run.
 
 - Board result: v4 scored 62.753 points (run ID and T/M/S/K not supplied), below the 66.975 baseline; reject it. Prepared next isolated candidate v2 (arithmetic/SWAR/AVX2 line parser), source SHA256 98D431ACF0BE0B55FB7D6CDC65CDD4031EE2FC882F3D9C4D4F15FD17B73162C0; cargo fmt --check passes. The only active milestone remains 70 real-board points; 80 is deferred.
+
+- Board result: v2 scored 66.987 points (run ID and T/M/S/K not supplied), a 0.012-point gain over the 66.975 control but still below the 70 target. Prepared next isolated candidate v5 (partial percentile selection), source SHA256 BA278BEF42D32D49409735326CCF0405FA04997B0A6BAB02401F9E5368ABC35C; cargo fmt --check passes. v2 remains the best known board result until v5 is scored. Continue toward 70; 80 remains deferred.
