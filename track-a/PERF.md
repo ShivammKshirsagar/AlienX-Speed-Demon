@@ -499,4 +499,8 @@ H192 board result: run-9559d5e4b4e2 scored T=0.074997 s, M=46,514,176 B, S=575, 
 
 H193 board result: run-7c71f97384e7 scored T=0.076639 s, M=46,415,872 B, S=574, K=19.829392, 64.865470 points. The per-worker endpoint reservation regressed; restored H184.
 
-| H194 | Accumulate status-5 errors with a boolean-to-u32 addition instead of a branch, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |
+| H194 | Accumulate status-5 errors with a boolean-to-u32 addition instead of a branch, atop H184 | run-b8235acb0b79 | 93d68c30a12d86bf05a85cc8e61fdff89788e2ef | T=0.059130 s / M=46,583,808 B / S=572 / K=22.570649 / 67.677203 pts | Docker seed-1 hash and worked example passed | Rejected below H184. |
+
+H194 board result: run-b8235acb0b79 scored T=0.059130 s, M=46,583,808 B, S=572, K=22.570649, 67.677203 points. Branchless status accumulation did not improve the board score; restored H184.
+
+| H195 | Inline the AVX2 line-field scanner, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |
