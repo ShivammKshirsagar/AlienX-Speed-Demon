@@ -463,4 +463,8 @@ H183 board result: run-23f2062c4422 scored T=0.054407 s, M=46,309,376 B, S=570, 
 
 H184 board result: run-590815088b72 scored T=0.054007 s, M=46,202,880 B, S=574, K=23.643337, 68.685439 points. The eight-byte group-key multiply mix is retained as the active best; the 71-point target remains unmet.
 
-| H185 | Inline up to three latencies per group before spilling to Vec, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Docker full seed-1 hash passed; local timing not used | Pending board score |
+| H185 | Inline up to three latencies per group before spilling to Vec, atop H184 | run-6164043f1eca | f8c4dd6404e67d7df347e8132018d410822fc677 | T=0.064468 s / M=48,709,632 B / S=619 / K=21.171700 / 66.287786 pts | Docker seed-1 hash passed | Rejected; both time and memory increased. Restored H184. |
+
+H185 board result: run-6164043f1eca scored T=0.064468 s, M=48,709,632 B, S=619, K=21.171700, 66.287786 points. Inline storage for up to three samples increased both time and memory; reverted to H184.
+
+| H186 | Replace dense hour×endpoint group matrix with sparse populated groups, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |

@@ -43,6 +43,6 @@ Do not fill run IDs or board metrics from local measurements. v7 (parser plus ex
 
 | H184 integer group-key hash | 184487c11bd7d4815ebb97b4ebf4a189631ddc03 | run-590815088b72 | 0.054007 s | 46,202,880 B | 574 | 23.643337 | 68.685439 points; full seed-1 hash passed, current best |
 
-| H185 inline small groups | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Up to three samples stored inline before Vec spill; Docker full seed-1 hash passed, board score pending |
+| H185 inline small groups | f8c4dd6404e67d7df347e8132018d410822fc677 | run-6164043f1eca | 0.064468 s | 48,709,632 B | 619 | 21.171700 | 66.287786 points; correctness passed, rejected below H184 |
 
 | H184 integer group-key hash | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Specializes eight-byte group-key hashing; full Docker check pending. |
