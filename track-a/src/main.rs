@@ -101,63 +101,59 @@ fn parse_uint(bytes: &[u8]) -> u32 {
 #[target_feature(enable = "avx2")]
 unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
     use std::arch::x86_64::*;
-    let (mut p, mut a, mut b, mut n) = (28, 0, 0, 0);
-    while p + 32 <= line.len() {
-        // SAFETY: the loop condition guarantees a full readable vector.
-        let x = unsafe { _mm256_loadu_si256(line.as_ptr().add(p).cast()) };
-        let s = _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, _mm256_set1_epi8(b' ' as i8))) as u32;
-        let e = _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, _mm256_set1_epi8(b'\n' as i8))) as u32;
-        let stop = if e == 0 {
-            32
-        } else {
-            e.trailing_zeros() as usize
+    let (mut p, mut first, mut second, mut found) = (28, 0, 0, 0);
+    while p + 64 <= line.len() {
+        // SAFETY: p+64 is within the readable input slice, so both vector loads are in bounds.
+        let (nl0, sp0, nl1, sp1) = unsafe {
+            let a = _mm256_loadu_si256(line.as_ptr().add(p).cast());
+            let b = _mm256_loadu_si256(line.as_ptr().add(p + 32).cast());
+            (
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, _mm256_set1_epi8(b'\n' as i8))) as u32,
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, _mm256_set1_epi8(b' ' as i8))) as u32,
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(b, _mm256_set1_epi8(b'\n' as i8))) as u32,
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(b, _mm256_set1_epi8(b' ' as i8))) as u32,
+            )
         };
-        let mut m = s & if stop == 32 {
-            u32::MAX
+        let newlines = u64::from(nl0) | (u64::from(nl1) << 32);
+        let mut spaces = u64::from(sp0) | (u64::from(sp1) << 32);
+        let stop = if newlines == 0 {
+            64
         } else {
-            (1 << stop) - 1
+            newlines.trailing_zeros() as usize
         };
-        while m != 0 && n < 2 {
-            let q = p + m.trailing_zeros() as usize;
-            if n == 0 {
-                a = q
-            } else {
-                b = q
+        if newlines != 0 {
+            spaces &= (1u64 << stop) - 1;
+        }
+        if found < 2 && spaces != 0 {
+            if found == 0 {
+                first = p + spaces.trailing_zeros() as usize;
+                found = 1;
+                spaces &= spaces - 1;
             }
-            n += 1;
-            m &= m - 1;
-        }
-        if e != 0 {
-            return (p + stop, a, b);
-        }
-        p += 32;
-    }
-    for i in p..line.len() {
-        if line[i] == b'\n' {
-            return (i, a, b);
-        }
-        if line[i] == b' ' && n < 2 {
-            if n == 0 {
-                a = i
-            } else {
-                b = i
+            if spaces != 0 && found == 1 {
+                second = p + spaces.trailing_zeros() as usize;
+                found = 2;
             }
-            n += 1;
+        }
+        if newlines != 0 {
+            return (p + stop, first, second);
+        }
+        p += 64;
+    }
+    for at in p..line.len() {
+        if line[at] == b'\n' {
+            return (at, first, second);
+        }
+        if line[at] == b' ' && found < 2 {
+            if found == 0 {
+                first = at;
+            } else {
+                second = at;
+            }
+            found += 1;
         }
     }
-    (line.len(), a, b)
-}
-fn parse_uint_swar(bytes: &[u8]) -> u32 {
-    if bytes.len() != 8 {
-        return parse_uint(bytes);
-    }
-    // SAFETY: exactly eight token bytes are readable; converting from LE fixes byte order.
-    let word = u64::from_le(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast()) });
-    let mut value = 0u32;
-    for shift in 0..8 {
-        value = value * 10 + ((word >> (shift * 8)) as u8 - b'0') as u32;
-    }
-    value
+    (line.len(), first, second)
 }
 
 fn parse_range<'a>(data: &'a [u8], start: usize, end: usize) -> Local<'a> {
@@ -270,36 +266,16 @@ fn hour_strings() -> Vec<[u8; 20]> {
         .collect()
 }
 
-const fn digit_pairs() -> [u8; 200] {
-    let mut digits = [0; 200];
-    let mut value = 0;
-    while value < 100 {
-        digits[value * 2] = b'0' + (value / 10) as u8;
-        digits[value * 2 + 1] = b'0' + (value % 10) as u8;
-        value += 1;
-    }
-    digits
-}
-
-const DIGIT_PAIRS: [u8; 200] = digit_pairs();
-
 fn push_uint(out: &mut Vec<u8>, mut n: u64) {
     let mut digits = [0u8; 20];
     let mut at = digits.len();
-    while n >= 100 {
-        let quotient = n / 100;
-        let pair = (n - quotient * 100) as usize * 2;
-        at -= 2;
-        digits[at..at + 2].copy_from_slice(&DIGIT_PAIRS[pair..pair + 2]);
-        n = quotient;
-    }
-    if n >= 10 {
-        at -= 2;
-        let pair = n as usize * 2;
-        digits[at..at + 2].copy_from_slice(&DIGIT_PAIRS[pair..pair + 2]);
-    } else {
+    loop {
         at -= 1;
-        digits[at] = b'0' + n as u8;
+        digits[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
     }
     out.extend_from_slice(&digits[at..]);
 }

@@ -29,3 +29,7 @@ Do not fill run IDs or board metrics from local measurements. v7 (parser plus ex
 | v7 restore repeat | 66be859cf79f1e836d99272c550a730361ced921 | run-a53fa3e56639 | 0.065110 s | 47,505,408 B | 526 | 21.696220 | 66.819204 points; same v7 source, below historical best 67.289394 |
 
 | H179 fast integer output | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Pairwise decimal formatter atop v7; boundary equivalence checked; board result pending |
+
+| H179 fast integer output | 04c3fa8776c2265fb4c915876dbd4d6449c87fcb | run-018d7b51d241 | 0.063230 s | 47,517,696 B | 544 | 21.904427 | 67.026595 points; correctness passed, rejected below v7 |
+
+| H180 two-block AVX2 scan | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | One scanner change atop v7; board result pending |
