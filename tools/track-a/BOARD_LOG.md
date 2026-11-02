@@ -3,6 +3,66 @@
 | Role | Commit | Run ID | T | M | S | K | Result |
 |---|---|---|---:|---:|---:|---:|---|
 | Initial control | `b4d1b99` | Not provided | 0.066 s | 47 MB | 497 | 21.852 | Board result supplied in the mission |
-| Candidate C | v7 / `Fast parse exit` | Pending | TBD | TBD | 524 local estimate | TBD | Awaiting author push and board result |
+| v4 latency arena | Commit/run ID not supplied | Not supplied | Not supplied | Not supplied | Not supplied | Not supplied | 62.753 points; rejected, below the initial control |
+| v2 fast parser | Commit/run ID not supplied | Not supplied | Not supplied | Not supplied | Not supplied | Not supplied | 66.987 points; current best, target 70 not reached |
+| v5 partial selection | Commit/run ID not supplied | Not supplied | Not supplied | Not supplied | Not supplied | Not supplied | 66.661 points; rejected, below v2 |
+| v3 endpoint table | Commit/run ID not supplied | Not supplied | Not supplied | Not supplied | Not supplied | Not supplied | 66.506 points; rejected, below v2 |
+| v1 exit path | Commit/run ID not supplied | Not supplied | Not supplied | Not supplied | Not supplied | Not supplied | 67.034 points; new best, target 70 not reached |
+| v7 parser + exit | `73b102f33ad580661005ba129efd396ddf72df0c` | run-eefcfa8a21c2 | 0.062314 s | 47,575,040 B | 526 | 22.171133 | 67.289394 points; best known, below target 71 |
+| v8 parser + exit + selection | `ce593ff82c0ef4852183836fa5bf1830d200a521` | run-40f20faa186c | 0.063016 s | 47,259,648 B | 541 | 21.983725 | 67.105065 points; rejected, below v7 |
+| c3 shared output | Commit/run ID not supplied | RUN-ID-TBD | Not supplied | Not supplied | Not supplied | Not supplied | 62.596 points; rejected, below v7 |
+| H142 compact group index | `6dec450` | RUN-ID-TBD | TBD | TBD | 555 | TBD | Locally committed, awaiting board submission |
+| H142 compact group index (scored) | `1e0632050363f93262caef45d42b84f1b04c56a8` | run-dc3e534c6b5b | 0.0848 s | 38,584,320 B | 555 | 19.659857 | 64.679018 points; rejected below v7 |
+| H83 CRC32C group index | `74c7df4534f2fa8b86367c9f884f5d6b70605c67` | run-95ac2b92059b | 0.082354 s | 43,110,400 B | 558 | 19.496224 | 64.497525 points; rejected below v7, all gates passed |
+| v7 repeat | `c9447d4004ca09c2231e72e46bf738f1cf00ca89` | run-a30ce72b346b | 0.074608 s | 47,198,208 B | 526 | 20.294518 | 65.368937 points; below previous v7 result |
+| v7 fast parser + exit (restored best) | Source `2FD6CA6CFA5551C735C3A2D2D812D767D1334FA60570302F480D2E157960AE17` | Existing run-eefcfa8a21c2 | 0.062314 s | 47,575,040 B | 526 | 22.171133 | 67.289394 points; best known, restored locally |
+| H173 H142 groups with 12/12 workers | `2b1c989bca2ceb5810c0a6b9424df491da1128ac` | run-388df169828f | 0.072067 s | 39,657,472 B | 555 | 21.209343 | 66.326361 points; rejected below v7 best; all gates passed |
+| H174 H173 with parallel output and `_exit` | Pending commit | RUN-ID-TBD | TBD | TBD | 559 | TBD | Active board candidate; fixed equal-hour output blocks; source SHA256 `C3790BADD24852E879AB513CB6F09720F53E67E7E07FFEF13488DFAA0234AA59` |
+| H174 parallel output | `8c1a1e1e2d1908240e2b2eea5ae9a0b5611f5a57` | run-4dc5f1362b5c | 0.061107 s | 54,181,888 B | 559 | 21.616049 | 66.738816 points; gates passed, rejected below v7 K |
+| H175 streaming parallel writes | `25679c4324fa4a301c01cbd584c766d874e7856a` | run-cb0b856f78a8 | 0.076954 s | 41,390,080 B | 575 | 20.242277 | 65.312968 points; passed gates but time regressed; rejected |
+| H176 batched output | `6717f04953005925102fde2ba02a375b32c00293` | run-5d0099fd4be7 | 0.079591 s | 46,931,968 B | 560 | 19.487246 | 64.487523 points; gates passed, rejected for time regression |
+| H177 capacity-reserved parallel output | `1e2eb13b0f33b242b3b37736130f0f3105c002af` | run-6d2621482e1e | 0.067338 s | 50,778,112 B | 575 | 20.772502 | 65.874440 points; passed gates; extra sizing pass cost time |
+| H178 rough output reserve | 249b11156def0eccfd0305cfcf61577aa474f69b | run-8199196f223f | 0.059838 s | 52,527,104 B | 559 | 21.979985 | 67.101370 points; rejected below v7 |
 
-Do not fill run IDs or board metrics from local measurements. The next step requires the author to submit candidate C manually; continue only after its board result is available.
+Do not fill run IDs or board metrics from local measurements. v7 (parser plus exit) remains the best known board result at 67.289. H178 scored below v7; the active source has been restored to board-proven v7 (SHA256 `2FD6CA6CFA5551C735C3A2D2D812D767D1334FA60570302F480D2E157960AE17`). Continue using real board results; the active milestone is at least 71 points.
+
+| v7 restore repeat | 66be859cf79f1e836d99272c550a730361ced921 | run-a53fa3e56639 | 0.065110 s | 47,505,408 B | 526 | 21.696220 | 66.819204 points; same v7 source, below historical best 67.289394 |
+
+| H179 fast integer output | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Pairwise decimal formatter atop v7; boundary equivalence checked; board result pending |
+
+| H179 fast integer output | 04c3fa8776c2265fb4c915876dbd4d6449c87fcb | run-018d7b51d241 | 0.063230 s | 47,517,696 B | 544 | 21.904427 | 67.026595 points; correctness passed, rejected below v7 |
+
+| H180 two-block AVX2 scan | 47f85506c59f97544112929f55000ce39c275ff6 | run-c09af698dc5c | Build failed | Ã¢â‚¬â€ | Ã¢â‚¬â€ | Ã¢â‚¬â€ | Scanner transplant omitted `parse_uint_swar`; board build error identified it. |
+
+| H181 corrected two-block AVX2 scan | b9bd6a765441c2e0ba5b0f82cc40fe7754cf8e38 | run-0a505087a037 | 0.061442 s | 47,497,216 B | 534 | 22.284706 | 67.400345 points; correctness passed, new best |
+
+| H182 SWAR latency parser | bfa4505c02555fffc2240f043555afbf0b4d3443 | run-5643c5c53bec | 0.061457 s | 47,566,848 B | 541 | 22.231986 | 67.348913 points; correctness passed, below H181 |
+
+| H182 four-digit SWAR latency parser | bfa4505c02555fffc2240f043555afbf0b4d3443 | run-5643c5c53bec | 0.061457 s | 47,566,848 B | 541 | 22.231986 | 67.348913 points; correctness passed, below H181 |
+| H183 cached endpoint fingerprint | 161c9098ffa156584c48982a3220e464870e0bca | run-23f2062c4422 | 0.054407 s | 46,309,376 B | 570 | 23.570131 | 68.618100 points; full seed-1 hash passed, new best |
+
+| H184 integer group-key hash | 184487c11bd7d4815ebb97b4ebf4a189631ddc03 | run-590815088b72 | 0.054007 s | 46,202,880 B | 574 | 23.643337 | 68.685439 points; full seed-1 hash passed, current best |
+
+| H185 inline small groups | f8c4dd6404e67d7df347e8132018d410822fc677 | run-6164043f1eca | 0.064468 s | 48,709,632 B | 619 | 21.171700 | 66.287786 points; correctness passed, rejected below H184 |
+
+| H186 sparse group hash maps | e3922627c64d192e737d8d759a44ecee66bd0458 | run-6f3fc7b14c3a | 0.058531 s | 56,606,720 B | 542 | 21.995707 | 67.116897 points; correctness passed, rejected below H184 |
+
+| H187 sparse sorted group vectors | 75037486d75e0dccbf4a8911e209c6d8e0389188 | run-7ece9888b7cf | 0.056983 s | 51,863,552 B | 551 | 22.630104 | 67.734327 points; correctness passed, rejected below H184 |
+
+| H188 last endpoint cache | 1929ececd90d33150d3e9c2f272ae36b5ce8bfd6 | run-7008c4a3e7b5 | 0.054670 s | 46,366,720 B | 584 | 23.422144 | 68.481333 points; correctness passed, rejected below H184 |
+
+| H189 lighter endpoint fingerprint | 82bdd93e6f14f91e01d83301626b7d3cd88fe31c | run-aded64840da9 | 0.060009 s | 46,718,976 B | 570 | 22.403523 | 67.515815 points; correctness passed, rejected below H184 |
+
+| H190 adaptive single-block scanner | 09dae1cd70d003a21233b6d41879f99d5d5e73df | run-74b711209003 | 0.054888 s | 46,477,312 B | 566 | 23.474428 | 68.529751 points; correctness passed, rejected below H184 |
+
+| H191 fixed-width latency parser | aa6f883db22122f43f9b40fc1a020f84a13c9155 | run-7d38c5531254 | 0.054760 s | 46,125,056 B | 587 | 23.409362 | 68.469479 points; correctness passed, rejected below H184 |
+
+| H192 force-inline output formatter | a789d951a46f3abdd602a09f7ab75fa50b5fdef4 | run-9559d5e4b4e2 | 0.074997 s | 46,514,176 B | 575 | 20.031580 | 65.085760 points; correctness passed, rejected below H184 |
+
+| H193 endpoint Vec reserve | a96a89695970f883002f2dc4b0319f12a839deca | run-7c71f97384e7 | 0.076639 s | 46,415,872 B | 574 | 19.829392 | 64.865470 points; correctness passed, rejected below H184 |
+
+| H194 branchless status count | 93d68c30a12d86bf05a85cc8e61fdff89788e2ef | run-b8235acb0b79 | 0.059130 s | 46,583,808 B | 572 | 22.570649 | 67.677203 points; correctness passed, rejected below H184 |
+
+| H184 integer group-key hash | 184487c11bd7d4815ebb97b4ebf4a189631ddc03 | run-590815088b72 | 0.054007 s | 46,202,880 B | 574 | 23.643337 | 68.685439 points; current best |
+
+| H195 inline AVX2 scanner | 6bb35965d680990e268b888914a112b5e9ba17e1 | run-70228de89dfe | 0.058600 s | 46,723,072 B | 575 | 22.641184 | 67.744957 points; rejected below H184 |

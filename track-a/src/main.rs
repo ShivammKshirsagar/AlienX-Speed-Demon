@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
+use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::path::Path;
 use std::thread;
 
@@ -12,6 +12,11 @@ struct FastHasher(u64);
 
 impl Hasher for FastHasher {
     fn write(&mut self, bytes: &[u8]) {
+        // Group keys are 64-bit integers, so one odd multiply mixes them cheaply.
+        if bytes.len() == 8 {
+            self.0 = u64::from_ne_bytes(bytes.try_into().unwrap()).wrapping_mul(0x9e3779b185ebca87);
+            return;
+        }
         let mut h = if self.0 == 0 {
             0xcbf29ce484222325
         } else {
@@ -30,12 +35,53 @@ impl Hasher for FastHasher {
         self.0 = h ^ bytes.len() as u64;
     }
 
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+
     fn finish(&self) -> u64 {
         self.0
     }
 }
 
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
+
+struct Endpoint<'a>(&'a [u8], u64);
+
+fn endpoint_hash(bytes: &[u8]) -> u64 {
+    let first = if bytes.len() >= 8 {
+        u64::from_ne_bytes(bytes[..8].try_into().unwrap())
+    } else {
+        bytes
+            .iter()
+            .enumerate()
+            .fold(0, |x, (i, &b)| x | (u64::from(b) << (i * 8)))
+    };
+    let last = if bytes.len() >= 8 {
+        u64::from_ne_bytes(bytes[bytes.len() - 8..].try_into().unwrap())
+    } else {
+        first
+    };
+    let mut h =
+        first ^ last.rotate_left(23) ^ (bytes.len() as u64).wrapping_mul(0x9e3779b185ebca87);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51afd7ed558ccd);
+    h ^ (h >> 33)
+}
+
+impl PartialEq for Endpoint<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for Endpoint<'_> {}
+
+impl Hash for Endpoint<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.1);
+    }
+}
 
 struct Group {
     latencies: Vec<u32>,
@@ -59,7 +105,7 @@ impl Group {
 
 struct Local<'a> {
     endpoints: Vec<&'a [u8]>,
-    endpoint_ids: FastMap<&'a [u8], usize>,
+    endpoint_ids: FastMap<Endpoint<'a>, usize>,
     groups: Vec<FastMap<usize, Group>>,
 }
 
@@ -73,11 +119,12 @@ impl<'a> Local<'a> {
     }
 
     fn endpoint_id(&mut self, bytes: &'a [u8]) -> usize {
-        if let Some(&id) = self.endpoint_ids.get(bytes) {
+        let key = Endpoint(bytes, endpoint_hash(bytes));
+        if let Some(&id) = self.endpoint_ids.get(&key) {
             return id;
         }
         let id = self.endpoints.len();
-        self.endpoint_ids.insert(bytes, id);
+        self.endpoint_ids.insert(key, id);
         self.endpoints.push(bytes);
         id
     }
@@ -87,14 +134,8 @@ fn hour_index(ts: &[u8]) -> usize {
     let month = (ts[5] - b'0') * 10 + (ts[6] - b'0');
     let day = (ts[8] - b'0') * 10 + (ts[9] - b'0');
     let hour = (ts[11] - b'0') * 10 + (ts[12] - b'0');
-    let day_offset = match (month, day) {
-        (10, 30) => 0,
-        (10, 31) => 24,
-        (11, 1) => 48,
-        (11, 2) => 72,
-        _ => unreachable!("timestamp outside the specified window"),
-    };
-    day_offset + usize::from(hour) - 18
+    let day = usize::from(month - 10) * 31 + usize::from(day) - 30;
+    day * 24 + usize::from(hour) - 18
 }
 
 fn parse_uint(bytes: &[u8]) -> u32 {
@@ -105,35 +146,74 @@ fn parse_uint(bytes: &[u8]) -> u32 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn find_byte_avx2(bytes: &[u8], needle: u8) -> Option<usize> {
+unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
     use std::arch::x86_64::*;
-
-    let target = _mm256_set1_epi8(needle as i8);
-    let mut offset = 0;
-    while offset + 32 <= bytes.len() {
-        // SAFETY: the loop condition guarantees 32 readable bytes remain in the slice.
-        let chunk = unsafe { _mm256_loadu_si256(bytes.as_ptr().add(offset).cast()) };
-        let matches = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, target)) as u32;
-        if matches != 0 {
-            return Some(offset + matches.trailing_zeros() as usize);
+    let (mut p, mut first, mut second, mut found) = (28, 0, 0, 0);
+    while p + 64 <= line.len() {
+        // SAFETY: p+64 is within the readable input slice, so both vector loads are in bounds.
+        let (nl0, sp0, nl1, sp1) = unsafe {
+            let a = _mm256_loadu_si256(line.as_ptr().add(p).cast());
+            let b = _mm256_loadu_si256(line.as_ptr().add(p + 32).cast());
+            (
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, _mm256_set1_epi8(b'\n' as i8))) as u32,
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(a, _mm256_set1_epi8(b' ' as i8))) as u32,
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(b, _mm256_set1_epi8(b'\n' as i8))) as u32,
+                _mm256_movemask_epi8(_mm256_cmpeq_epi8(b, _mm256_set1_epi8(b' ' as i8))) as u32,
+            )
+        };
+        let newlines = u64::from(nl0) | (u64::from(nl1) << 32);
+        let mut spaces = u64::from(sp0) | (u64::from(sp1) << 32);
+        let stop = if newlines == 0 {
+            64
+        } else {
+            newlines.trailing_zeros() as usize
+        };
+        if newlines != 0 {
+            spaces &= (1u64 << stop) - 1;
         }
-        offset += 32;
+        if found < 2 && spaces != 0 {
+            if found == 0 {
+                first = p + spaces.trailing_zeros() as usize;
+                found = 1;
+                spaces &= spaces - 1;
+            }
+            if spaces != 0 && found == 1 {
+                second = p + spaces.trailing_zeros() as usize;
+                found = 2;
+            }
+        }
+        if newlines != 0 {
+            return (p + stop, first, second);
+        }
+        p += 64;
     }
-    bytes[offset..]
-        .iter()
-        .position(|&byte| byte == needle)
-        .map(|index| offset + index)
+    for at in p..line.len() {
+        if line[at] == b'\n' {
+            return (at, first, second);
+        }
+        if line[at] == b' ' && found < 2 {
+            if found == 0 {
+                first = at;
+            } else {
+                second = at;
+            }
+            found += 1;
+        }
+    }
+    (line.len(), first, second)
 }
 
-#[inline]
-fn find_byte(bytes: &[u8], needle: u8) -> Option<usize> {
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        // SAFETY: the allowed release target is explicitly compiled with AVX2 enabled.
-        return unsafe { find_byte_avx2(bytes, needle) };
+fn parse_uint_swar(bytes: &[u8]) -> u32 {
+    if bytes.len() != 8 {
+        return parse_uint(bytes);
     }
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-    bytes.iter().position(|&byte| byte == needle)
+    // SAFETY: exactly eight token bytes are readable; converting from LE fixes byte order.
+    let word = u64::from_le(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast()) });
+    let mut value = 0u32;
+    for shift in 0..8 {
+        value = value * 10 + ((word >> (shift * 8)) as u8 - b'0') as u32;
+    }
+    value
 }
 
 fn parse_range<'a>(data: &'a [u8], start: usize, end: usize) -> Local<'a> {
@@ -146,13 +226,11 @@ fn parse_range<'a>(data: &'a [u8], start: usize, end: usize) -> Local<'a> {
 
 fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local<'a>) {
     while *pos < end {
-        let line_end = find_byte(&data[*pos..end], b'\n').map_or(end, |n| *pos + n);
+        // SAFETY: the pinned release target supports AVX2 and the scanner guards every load.
+        let (line_len, field, endpoint_end) = unsafe { find_line_fields_avx2(&data[*pos..end]) };
+        let line_end = *pos + line_len;
         let line = &data[*pos..line_end];
-
-        // The timestamp has fixed width; only the date and hour bytes are needed.
-        let field = 28 + find_byte(&line[28..], b' ').unwrap();
         let endpoint_start = field + 1;
-        let endpoint_end = endpoint_start + find_byte(&line[endpoint_start..], b' ').unwrap();
         let status_start = endpoint_end + 1;
         let latency_start = status_start + 4;
         let endpoint = &line[endpoint_start..endpoint_end];
@@ -161,7 +239,9 @@ fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local
         let group = local.groups[hour]
             .entry(endpoint_id)
             .or_insert_with(Group::new);
-        group.latencies.push(parse_uint(&line[latency_start..]));
+        group
+            .latencies
+            .push(parse_uint_swar(&line[latency_start..]));
         if line[status_start] == b'5' {
             group.errors += 1;
         }
@@ -528,6 +608,9 @@ fn main() {
             });
         }
     });
-    drop(mapping);
-    std::process::exit(0);
+    unsafe extern "C" {
+        fn _exit(status: i32) -> !;
+    }
+    // SAFETY: output workers have joined and no destructor is needed after the write.
+    unsafe { _exit(0) }
 }

@@ -1,13 +1,13 @@
 # Track A: Ingest
 
-The Rust program memory maps `requests.log` read-only and divides it into up to 12 newline-aligned byte ranges. Each worker parses the fixed-width date and hour directly from the timestamp, interns endpoint bytes in a local table, and accumulates latency and 5xx counts by hour and local endpoint ID. The main thread merges those tables, sorts each group's latencies in parallel, and writes groups in hour and unsigned-byte endpoint order. Percentiles use the spec's nearest-rank indices, and all output numbers use integer arithmetic.
+The program maps `requests.log` read-only and divides its bytes into up to twelve newline-aligned ranges. Each worker scans the fixed-width timestamp fields, interns endpoint slices borrowed from the mapping, and gathers latency values and 5xx counts by hour and endpoint. The local tables are combined by hour, percentile work is split across workers, and output is formatted in parallel. Endpoint ordering is bytewise, percentile ranks follow the specification, and counts and error rates use integer arithmetic.
 
-The fast hasher is local to this process and only hashes endpoint strings. Hash hits still compare the full endpoint bytes, so collisions do not merge distinct keys. Both Unix and Windows input paths use read-only file mappings; an empty input produces an empty output.
+The endpoint table uses a deterministic hasher. Hash collisions remain safe because complete endpoint bytes are compared. AVX2 scans delimiters when the release target supports it, with a scalar fallback for other builds and for the tail of each range.
 
 ## Dependencies
 
-None. The program uses Rust's standard library and small platform FFI declarations for file mapping.
+None. The solution uses Rust's standard library and small system calls for file mapping and positioned output writes.
 
 ## With another 24 hours
 
-I would build and benchmark on the scoring Linux image first, then compare 6, 10, and 12 workers and a counting-sort percentile path against the current full sort. I would keep a change only if it improves the correctness-checked board measurements. The local Windows timing and working-set figures are useful for iteration but do not predict the board's cgroup memory or CPU throughput.
+I would profile on the scoring Linux image and optimize the measured parse and merge costs first. The packed-record rewrite was checked against full and sample references, but its 15-run minimum was slower than the saved baseline and its RSS proxy was higher, so the baseline remains shipped. Further changes should pass the same correctness checks and demonstrate a repeatable end-to-end gain before replacing it.
