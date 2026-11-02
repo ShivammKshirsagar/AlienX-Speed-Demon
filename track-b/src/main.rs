@@ -7,9 +7,6 @@ use std::{
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 
-#[allow(dead_code)]
-const DIAG_STAGE: u8 = 0;
-
 pub struct Term {
     pub bytes: Vec<u8>,
     hash: u64,

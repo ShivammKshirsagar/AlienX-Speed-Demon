@@ -1,5 +1,0 @@
-# Read by the board and the scoring harness.
-track = "a"
-team = "AlienX"
-language = "rust"
-dependency_count = 0

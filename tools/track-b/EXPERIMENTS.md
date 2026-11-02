@@ -67,7 +67,7 @@
 1. The five-run baseline/pair/bitmap session used the same warm ext4 Docker volume, CPU set and flags; baseline T min/median = 951.967/990.752 ms and M median/max = 146,227,200/146,837,504 B.
 2. Pair ownership T min/median = 911.846/963.464 ms and M median/max = 146,022,400/146,530,304 B; S 998→1,000 gives estimated K ×1.0217, below the 3% keep threshold.
 3. Bitmap break-even T min/median = 878.401/942.884 ms and M median/max = 146,321,408/147,185,664 B; S 998→1,000 gives estimated K ×1.0406, so it clears the updated 3% score gate despite no memory reduction.
-4. Both saved variants build offline and pass the worked example, phrase-boundary fixture and seed-1 full hash; B sample seeds 2–5 are absent from the workspace and Docker volumes, so those reference checks remain unrun.
+4. The pair-ownership and bitmap-threshold variants each built offline and passed the worked example, phrase-boundary fixture and seed-1 full hash; B sample seeds 2–5 were absent from the workspace and Docker volumes, so those reference checks remained unrun.
 5. Radix sorting already runs one worker at a time (`for scan in &mut scans { radix_sort_pairs(..) }`); baseline measured memory.peak median/max 146,227,200/146,837,504 B, so 12 simultaneous radix temporaries are not present to remove.
 6. Four-partition u16 lists use the 250,000-doc corpus's four 65,536-ID ranges, but candidate T min/median = 979.931/995.193 ms and M median/max = 149,491,712/149,626,880 B against its interleaved baseline 920.725/1,276.493 ms and 146,255,872/146,595,840 B; S 998→1,038 yields K ×0.9755, so reverted.
 
@@ -85,8 +85,8 @@
 
 ## Interleaved follow-up decisions
 - The latest scoring instruction changes the keep gate from the earlier absolute 5 MB memory-drop gate to estimated K ≥3% using same-session min T and median `memory.peak`; the earlier pair/bitmap “reverted” rows record the then-active gate, while the decision below uses the updated gate.
-- Pair ownership: exact candidate source is saved in `candidates/pair-ownership/`; same-session T min/median 911.846/963.464 ms, M median/max 146,022,400/146,530,304 B, S=1,000; relative K ×1.0217, so rejected.
-- Bitmap break-even: exact candidate source is saved in `candidates/bitmap-threshold/`; same-session T min/median 878.401/942.884 ms, M median/max 146,321,408/147,185,664 B, S=1,000; relative K ×1.0406, so selected. Full seed-1 and both fixtures pass. Local cgroup max is 147,185,664 B; the no-timing final-source check measured memory.peak 146,309,120 B (anon 225,280; file 1,511,424; kernel 585,728; shmem 0 B after exit).
+- Pair ownership: same-session T min/median 911.846/963.464 ms, M median/max 146,022,400/146,530,304 B, S=1,000; relative K ×1.0217, so rejected.
+- Bitmap break-even: same-session T min/median 878.401/942.884 ms, M median/max 146,321,408/147,185,664 B, S=1,000; relative K ×1.0406, so selected. Full seed-1 and both fixtures pass. Local cgroup max is 147,185,664 B; the no-timing final-source check measured memory.peak 146,309,120 B (anon 225,280; file 1,511,424; kernel 585,728; shmem 0 B after exit).
 - The selected bitmap candidate's sampled df chooses only the representation. Its observed RssAnon peak is in the scan/pair-scatter phase; query-complete RssAnon is about 93 MB, below scan. No scan-state free was needed for this selected version.
 - Radix temp-buffer change: no change was needed. The baseline already sorts one worker buffer at a time, and the interleaved baseline M median/max was 146,227,200/146,837,504 B; there are not 12 simultaneous radix temporaries.
 - Four-run u16 lists: full hash passed, but interleaved baseline T min/median 920.725/1,276.493 ms and M median/max 146,255,872/146,595,840 B versus candidate 979.931/995.193 ms and 149,491,712/149,626,880 B; S=1,038, relative K ×0.9755, reverted.

@@ -1,5 +1,0 @@
-BOOL alpha
-BOOL alpha OR beta AND token
-PHRASE "edge token"
-PHRASE "token next"
-PHRASE "alpha"
