@@ -37,42 +37,6 @@ impl Hasher for FastHasher {
 
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
 
-struct EndpointTable<'a> {
-    slots: Vec<(&'a [u8], usize)>,
-    len: usize,
-}
-// Empty slices mark unused slots; request endpoints are always nonempty paths.
-#[rustfmt::skip]
-impl<'a> EndpointTable<'a> {
-    fn new() -> Self { Self { slots: vec![(&[][..], 0); 16], len: 0 } }
-    fn hash(key: &[u8]) -> usize {
-        let limit = key.len().min(16); let (mut h, mut at) = (key.len() as u64, 0);
-        while at + 8 <= limit {
-            // SAFETY: the loop guarantees eight readable bytes in the first 16-byte key prefix.
-            h = h.rotate_left(13) ^ unsafe { std::ptr::read_unaligned(key.as_ptr().add(at).cast::<u64>()) }; at += 8;
-        }
-        for &b in &key[at..limit] { h = h.rotate_left(7) ^ u64::from(b); }
-        (h ^ (h >> 29)).wrapping_mul(0xbf58476d1ce4e5b9).wrapping_add(h >> 32) as usize
-    }
-    fn get(&self, key: &[u8]) -> Option<usize> {
-        let mask = self.slots.len() - 1; let mut at = Self::hash(key) & mask;
-        while !self.slots[at].0.is_empty() { let (old, id) = self.slots[at]; if old == key { return Some(id); } at = (at + 1) & mask; }
-        None
-    }
-    fn raw(&mut self, key: &'a [u8], id: usize) {
-        let mask = self.slots.len() - 1; let mut at = Self::hash(key) & mask;
-        while !self.slots[at].0.is_empty() { at = (at + 1) & mask; }
-        self.slots[at] = (key, id); self.len += 1;
-    }
-    fn insert(&mut self, key: &'a [u8], id: usize) {
-        if (self.len + 1) * 10 >= self.slots.len() * 7 {
-            let cap = self.slots.len() * 2; let old = std::mem::replace(&mut self.slots, vec![(&[][..], 0); cap]); self.len = 0;
-            for (key, id) in old { if !key.is_empty() { self.raw(key, id); } }
-        }
-        self.raw(key, id);
-    }
-}
-
 struct Group {
     latencies: Vec<u32>,
     errors: u32,
@@ -95,7 +59,7 @@ impl Group {
 
 struct Local<'a> {
     endpoints: Vec<&'a [u8]>,
-    endpoint_ids: EndpointTable<'a>,
+    endpoint_ids: FastMap<&'a [u8], usize>,
     groups: Vec<FastMap<usize, Group>>,
 }
 
@@ -103,13 +67,13 @@ impl<'a> Local<'a> {
     fn new() -> Self {
         Self {
             endpoints: Vec::new(),
-            endpoint_ids: EndpointTable::new(),
+            endpoint_ids: FastMap::default(),
             groups: (0..HOURS).map(|_| FastMap::default()).collect(),
         }
     }
 
     fn endpoint_id(&mut self, bytes: &'a [u8]) -> usize {
-        if let Some(id) = self.endpoint_ids.get(bytes) {
+        if let Some(&id) = self.endpoint_ids.get(bytes) {
             return id;
         }
         let id = self.endpoints.len();
@@ -370,13 +334,13 @@ fn main() {
             .collect::<Vec<_>>()
     });
 
-    let mut global_ids = EndpointTable::new();
+    let mut global_ids: FastMap<&[u8], usize> = FastMap::default();
     let mut endpoints: Vec<&[u8]> = Vec::new();
     let mut remaps = Vec::with_capacity(locals.len());
     for local in &mut locals {
         let mut remap = Vec::with_capacity(local.endpoints.len());
         for endpoint in local.endpoints.drain(..) {
-            let id = if let Some(id) = global_ids.get(endpoint) {
+            let id = if let Some(&id) = global_ids.get(endpoint) {
                 id
             } else {
                 let id = endpoints.len();
@@ -564,6 +528,9 @@ fn main() {
             });
         }
     });
-    drop(mapping);
-    std::process::exit(0);
+    unsafe extern "C" {
+        fn _exit(status: i32) -> !;
+    }
+    // SAFETY: output workers have joined and no destructor is needed after the write.
+    unsafe { _exit(0) }
 }
