@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::hash::{BuildHasherDefault, Hasher};
+use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::path::Path;
 use std::thread;
 
@@ -30,12 +30,53 @@ impl Hasher for FastHasher {
         self.0 = h ^ bytes.len() as u64;
     }
 
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+
     fn finish(&self) -> u64 {
         self.0
     }
 }
 
 type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<FastHasher>>;
+
+struct Endpoint<'a>(&'a [u8], u64);
+
+fn endpoint_hash(bytes: &[u8]) -> u64 {
+    let first = if bytes.len() >= 8 {
+        u64::from_ne_bytes(bytes[..8].try_into().unwrap())
+    } else {
+        bytes
+            .iter()
+            .enumerate()
+            .fold(0, |x, (i, &b)| x | (u64::from(b) << (i * 8)))
+    };
+    let last = if bytes.len() >= 8 {
+        u64::from_ne_bytes(bytes[bytes.len() - 8..].try_into().unwrap())
+    } else {
+        first
+    };
+    let mut h =
+        first ^ last.rotate_left(23) ^ (bytes.len() as u64).wrapping_mul(0x9e3779b185ebca87);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51afd7ed558ccd);
+    h ^ (h >> 33)
+}
+
+impl PartialEq for Endpoint<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for Endpoint<'_> {}
+
+impl Hash for Endpoint<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.1);
+    }
+}
 
 struct Group {
     latencies: Vec<u32>,
@@ -59,7 +100,7 @@ impl Group {
 
 struct Local<'a> {
     endpoints: Vec<&'a [u8]>,
-    endpoint_ids: FastMap<&'a [u8], usize>,
+    endpoint_ids: FastMap<Endpoint<'a>, usize>,
     groups: Vec<FastMap<usize, Group>>,
 }
 
@@ -73,11 +114,12 @@ impl<'a> Local<'a> {
     }
 
     fn endpoint_id(&mut self, bytes: &'a [u8]) -> usize {
-        if let Some(&id) = self.endpoint_ids.get(bytes) {
+        let key = Endpoint(bytes, endpoint_hash(bytes));
+        if let Some(&id) = self.endpoint_ids.get(&key) {
             return id;
         }
         let id = self.endpoints.len();
-        self.endpoint_ids.insert(bytes, id);
+        self.endpoint_ids.insert(key, id);
         self.endpoints.push(bytes);
         id
     }
@@ -156,22 +198,15 @@ unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
     (line.len(), first, second)
 }
 
-fn parse_four(bytes: &[u8]) -> u32 {
-    let digits = u32::from_le_bytes(bytes[..4].try_into().unwrap()) - 0x30303030;
-    let pairs = (digits & 0x00ff00ff) * 10 + ((digits >> 8) & 0x00ff00ff);
-    (pairs & 0xffff) * 100 + (pairs >> 16)
-}
-
 fn parse_uint_swar(bytes: &[u8]) -> u32 {
-    if !(4..=8).contains(&bytes.len()) {
+    if bytes.len() != 8 {
         return parse_uint(bytes);
     }
-    let mut value = parse_four(&bytes[..4]);
-    if bytes.len() == 8 {
-        return value * 10_000 + parse_four(&bytes[4..]);
-    }
-    for &byte in &bytes[4..] {
-        value = value * 10 + u32::from(byte - b'0');
+    // SAFETY: exactly eight token bytes are readable; converting from LE fixes byte order.
+    let word = u64::from_le(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast()) });
+    let mut value = 0u32;
+    for shift in 0..8 {
+        value = value * 10 + ((word >> (shift * 8)) as u8 - b'0') as u32;
     }
     value
 }
