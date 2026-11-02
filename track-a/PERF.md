@@ -341,14 +341,14 @@ The instrumented phase snapshot belongs to candidate c1, not the currently selec
 
 ## Board variants (2026-11)
 
-These are single-change variants built from the source above. No board result has been supplied yet; fill in the author-run ID and board metrics after each push. No local timing claims are recorded here.
+These are single-change variants built from the baseline. Fill in each author-run ID and board metrics after its push. No local timing claims are used to select them.
 
 | Step | Change | Board run ID | Board T / M / S / K | Status |
 |---|---|---|---|---|
 | v1 | `_exit(0)` after output | RUN-ID-TBD | TBD | Delivered candidate; board result pending |
-| v2 | Arithmetic/SWAR/AVX2 line parser | RUN-ID-TBD | TBD | Delivered candidate; board result pending |
+| v2 | Arithmetic/SWAR/AVX2 line parser | RUN-ID-TBD | TBD | Current candidate; board result pending |
 | v3 | Open-address endpoint lookup | RUN-ID-TBD | TBD | Delivered candidate; board result pending |
-| v4 | Per-worker bump arena for grouped latencies | RUN-ID-TBD | TBD | Delivered candidate; board result pending |
+| v4 | Per-worker bump arena for grouped latencies | RUN-ID-TBD | Points 62.753; T/M/S/K not supplied | Rejected; below baseline 66.975 |
 | v5 | Partial percentile selection | RUN-ID-TBD | TBD | Delivered candidate; board result pending |
 
 ## Selection correction for board evidence
@@ -409,4 +409,5 @@ H164 scored 65.398 points on run `run-0e251929474d`, below the author-reported b
 
 | Candidate | Change | Board run ID | Board T / M / S / K | Result |
 |---|---|---|---|---|
-| v4 | Per-worker latency arena; prepared from independently checked variant | RUN-ID-TBD | TBD | Pending board measurement; local RSS proxy in variants/README.md is not a board result |
+| v4 | Per-worker latency arena | RUN-ID-TBD | Points 62.753; T/M/S/K not supplied | Rejected; below baseline 66.975 |
+| v2 | Arithmetic/SWAR/AVX2 line parser | RUN-ID-TBD | TBD | Prepared from independently checked variant; awaiting board measurement |

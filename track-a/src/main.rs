@@ -43,8 +43,6 @@ struct Group {
     p50: u32,
     p95: u32,
     p99: u32,
-    arena_start: usize,
-    arena_count: usize,
 }
 
 impl Group {
@@ -55,8 +53,6 @@ impl Group {
             p50: 0,
             p95: 0,
             p99: 0,
-            arena_start: 0,
-            arena_count: 0,
         }
     }
 }
@@ -65,7 +61,6 @@ struct Local<'a> {
     endpoints: Vec<&'a [u8]>,
     endpoint_ids: FastMap<&'a [u8], usize>,
     groups: Vec<FastMap<usize, Group>>,
-    arena: Vec<u32>,
 }
 
 impl<'a> Local<'a> {
@@ -74,7 +69,6 @@ impl<'a> Local<'a> {
             endpoints: Vec::new(),
             endpoint_ids: FastMap::default(),
             groups: (0..HOURS).map(|_| FastMap::default()).collect(),
-            arena: Vec::new(),
         }
     }
 
@@ -93,14 +87,8 @@ fn hour_index(ts: &[u8]) -> usize {
     let month = (ts[5] - b'0') * 10 + (ts[6] - b'0');
     let day = (ts[8] - b'0') * 10 + (ts[9] - b'0');
     let hour = (ts[11] - b'0') * 10 + (ts[12] - b'0');
-    let day_offset = match (month, day) {
-        (10, 30) => 0,
-        (10, 31) => 24,
-        (11, 1) => 48,
-        (11, 2) => 72,
-        _ => unreachable!("timestamp outside the specified window"),
-    };
-    day_offset + usize::from(hour) - 18
+    let day = usize::from(month - 10) * 31 + usize::from(day) - 30;
+    day * 24 + usize::from(hour) - 18
 }
 
 fn parse_uint(bytes: &[u8]) -> u32 {
@@ -111,66 +99,82 @@ fn parse_uint(bytes: &[u8]) -> u32 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn find_byte_avx2(bytes: &[u8], needle: u8) -> Option<usize> {
+unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
     use std::arch::x86_64::*;
-
-    let target = _mm256_set1_epi8(needle as i8);
-    let mut offset = 0;
-    while offset + 32 <= bytes.len() {
-        // SAFETY: the loop condition guarantees 32 readable bytes remain in the slice.
-        let chunk = unsafe { _mm256_loadu_si256(bytes.as_ptr().add(offset).cast()) };
-        let matches = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, target)) as u32;
-        if matches != 0 {
-            return Some(offset + matches.trailing_zeros() as usize);
+    let (mut p, mut a, mut b, mut n) = (28, 0, 0, 0);
+    while p + 32 <= line.len() {
+        // SAFETY: the loop condition guarantees a full readable vector.
+        let x = unsafe { _mm256_loadu_si256(line.as_ptr().add(p).cast()) };
+        let s = _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, _mm256_set1_epi8(b' ' as i8))) as u32;
+        let e = _mm256_movemask_epi8(_mm256_cmpeq_epi8(x, _mm256_set1_epi8(b'\n' as i8))) as u32;
+        let stop = if e == 0 {
+            32
+        } else {
+            e.trailing_zeros() as usize
+        };
+        let mut m = s & if stop == 32 {
+            u32::MAX
+        } else {
+            (1 << stop) - 1
+        };
+        while m != 0 && n < 2 {
+            let q = p + m.trailing_zeros() as usize;
+            if n == 0 {
+                a = q
+            } else {
+                b = q
+            }
+            n += 1;
+            m &= m - 1;
         }
-        offset += 32;
+        if e != 0 {
+            return (p + stop, a, b);
+        }
+        p += 32;
     }
-    bytes[offset..]
-        .iter()
-        .position(|&byte| byte == needle)
-        .map(|index| offset + index)
+    for i in p..line.len() {
+        if line[i] == b'\n' {
+            return (i, a, b);
+        }
+        if line[i] == b' ' && n < 2 {
+            if n == 0 {
+                a = i
+            } else {
+                b = i
+            }
+            n += 1;
+        }
+    }
+    (line.len(), a, b)
 }
-
-#[inline]
-fn find_byte(bytes: &[u8], needle: u8) -> Option<usize> {
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    {
-        // SAFETY: the allowed release target is explicitly compiled with AVX2 enabled.
-        return unsafe { find_byte_avx2(bytes, needle) };
+fn parse_uint_swar(bytes: &[u8]) -> u32 {
+    if bytes.len() != 8 {
+        return parse_uint(bytes);
     }
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-    bytes.iter().position(|&byte| byte == needle)
+    // SAFETY: exactly eight token bytes are readable; converting from LE fixes byte order.
+    let word = u64::from_le(unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast()) });
+    let mut value = 0u32;
+    for shift in 0..8 {
+        value = value * 10 + ((word >> (shift * 8)) as u8 - b'0') as u32;
+    }
+    value
 }
 
 fn parse_range<'a>(data: &'a [u8], start: usize, end: usize) -> Local<'a> {
     let mut local = Local::new();
     let mut pos = start;
-    parse_into(data, &mut pos, end, &mut local, false);
-    let total = local
-        .groups
-        .iter()
-        .flat_map(|g| g.values())
-        .map(|g| g.arena_count)
-        .sum();
-    local.arena.resize(total, 0);
-    let mut at = 0;
-    for group in local.groups.iter_mut().flat_map(|g| g.values_mut()) {
-        group.arena_start = at;
-        at += group.arena_count;
-    }
-    pos = start;
-    parse_into(data, &mut pos, end, &mut local, true);
+    parse_into(data, &mut pos, end, &mut local);
     assert_eq!(pos, end);
     local
 }
 
-fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local<'a>, fill: bool) {
+fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local<'a>) {
     while *pos < end {
-        let line_end = find_byte(&data[*pos..end], b'\n').map_or(end, |n| *pos + n);
+        // SAFETY: the pinned release target supports AVX2 and the scanner guards every load.
+        let (line_len, field, endpoint_end) = unsafe { find_line_fields_avx2(&data[*pos..end]) };
+        let line_end = *pos + line_len;
         let line = &data[*pos..line_end];
-        let field = 28 + find_byte(&line[28..], b' ').unwrap();
         let endpoint_start = field + 1;
-        let endpoint_end = endpoint_start + find_byte(&line[endpoint_start..], b' ').unwrap();
         let status_start = endpoint_end + 1;
         let latency_start = status_start + 4;
         let endpoint = &line[endpoint_start..endpoint_end];
@@ -179,14 +183,11 @@ fn parse_into<'a>(data: &'a [u8], pos: &mut usize, end: usize, local: &mut Local
         let group = local.groups[hour]
             .entry(endpoint_id)
             .or_insert_with(Group::new);
-        if fill {
-            local.arena[group.arena_start] = parse_uint(&line[latency_start..]);
-            group.arena_start += 1;
-        } else {
-            group.arena_count += 1;
-            if line[status_start] == b'5' {
-                group.errors += 1;
-            }
+        group
+            .latencies
+            .push(parse_uint_swar(&line[latency_start..]));
+        if line[status_start] == b'5' {
+            group.errors += 1;
         }
         *pos = line_end + 1;
     }
@@ -383,7 +384,7 @@ fn main() {
                 .map(|local| {
                     local.groups[hour]
                         .values()
-                        .map(|group| group.arena_count)
+                        .map(|group| group.latencies.len())
                         .sum::<usize>()
                 })
                 .sum()
@@ -404,21 +405,14 @@ fn main() {
         ranges.push(start_hour..HOURS);
     }
 
-    let mut range_jobs: Vec<
-        Vec<(
-            Vec<usize>,
-            Vec<FastMap<usize, Group>>,
-            std::sync::Arc<Vec<u32>>,
-        )>,
-    > = (0..ranges.len())
+    let mut range_jobs: Vec<Vec<(Vec<usize>, Vec<FastMap<usize, Group>>)>> = (0..ranges.len())
         .map(|_| Vec::with_capacity(locals.len()))
         .collect();
     for (local, remap) in locals.into_iter().zip(remaps) {
-        let arena = std::sync::Arc::new(local.arena);
         let mut hour_maps = local.groups.into_iter();
         for (range, jobs) in ranges.iter().zip(&mut range_jobs) {
             let maps = hour_maps.by_ref().take(range.len()).collect();
-            jobs.push((remap.clone(), maps, std::sync::Arc::clone(&arena)));
+            jobs.push((remap.clone(), maps));
         }
     }
 
@@ -430,15 +424,16 @@ fn main() {
             let (destination, tail) = remaining.split_at_mut(range.len() * endpoint_count);
             remaining = tail;
             scope.spawn(move || {
-                for (remap, hour_maps, arena) in sources {
+                for (remap, hour_maps) in sources {
                     for (hour_offset, groups) in hour_maps.into_iter().enumerate() {
                         for (local_endpoint, mut partial) in groups {
                             let index = hour_offset * endpoint_count + remap[local_endpoint];
-                            let end = partial.arena_start;
-                            let start = end - partial.arena_count;
-                            destination[index]
-                                .latencies
-                                .extend_from_slice(&arena[start..end]);
+                            if destination[index].latencies.is_empty() {
+                                destination[index].latencies =
+                                    std::mem::take(&mut partial.latencies);
+                            } else {
+                                destination[index].latencies.append(&mut partial.latencies);
+                            }
                             destination[index].errors += partial.errors;
                         }
                     }
