@@ -409,14 +409,14 @@ H164 scored 65.398 points on run `run-0e251929474d`, below the author-reported b
 
 ## 71-point target iteration
 
-| Candidate | Change | Board run ID | Board T / M / S / K | Result |
-|---|---|---|---|---|
-| v4 | Per-worker latency arena | RUN-ID-TBD | Points 62.753; T/M/S/K not supplied | Rejected; below baseline 66.975 |
-| v2 | Arithmetic/SWAR/AVX2 line parser | RUN-ID-TBD | Points 66.987; T/M/S/K not supplied | Below target 71 |
-| v5 | Partial percentile selection | RUN-ID-TBD | Points 66.661; T/M/S/K not supplied | Rejected; below best 66.987 |
-| v3 | Open-address endpoint lookup | RUN-ID-TBD | Points 66.506; T/M/S/K not supplied | Rejected; below best 66.987 |
-| v1 | `_exit(0)` after output | RUN-ID-TBD | Points 67.034; T/M/S/K not supplied | Below target 71 |
-| v7 | v1 exit path plus v2 parser | run-eefcfa8a21c2 | T=0.062314 s / M=47,575,040 B / S=526 / K=22.171133 / 67.289394 pts | Best known so far; below target 71 |
-| v8 | v7 plus v5 percentile selection | run-40f20faa186c | T=0.063016 s / M=47,259,648 B / S=541 / K=21.983725 / 67.105065 pts | Rejected; below v7 67.289 |
-| c3 | Shared-mapped output with positioned-write fallback | RUN-ID-TBD | Points 62.596; T/M/S/K not supplied | Rejected; below v7 67.289 |
-| H142 | Compact group index, 7 parse/5 post workers, huge-page hint | RUN-ID-TBD | TBD | Prepared from prior full-checked source; board result pending |
+| Candidate | Change | Board run ID | Commit | Board T / M / S / K | Result |
+|---|---|---|---|---|---|
+| v4 | Per-worker latency arena | RUN-ID-TBD | COMMIT-TBD | Points 62.753; T/M/S/K not supplied | Rejected; below baseline 66.975 |
+| v2 | Arithmetic/SWAR/AVX2 line parser | RUN-ID-TBD | COMMIT-TBD | Points 66.987; T/M/S/K not supplied | Below target 71 |
+| v5 | Partial percentile selection | RUN-ID-TBD | COMMIT-TBD | Points 66.661; T/M/S/K not supplied | Rejected; below best 66.987 |
+| v3 | Open-address endpoint lookup | RUN-ID-TBD | COMMIT-TBD | Points 66.506; T/M/S/K not supplied | Rejected; below best 66.987 |
+| v1 | `_exit(0)` after output | RUN-ID-TBD | COMMIT-TBD | Points 67.034; T/M/S/K not supplied | Below target 71 |
+| v7 | v1 exit path plus v2 parser | run-eefcfa8a21c2 | 73b102f33ad580661005ba129efd396ddf72df0c | T=0.062314 s / M=47,575,040 B / S=526 / K=22.171133 | Best known; 67.289394 pts, below target 71 |
+| v8 | v7 plus v5 percentile selection | run-40f20faa186c | ce593ff82c0ef4852183836fa5bf1830d200a521 | T=0.063016 s / M=47,259,648 B / S=541 / K=21.983725 | Rejected; 67.105065 pts, below v7 |
+| c3 | Shared-mapped output with positioned-write fallback | RUN-ID-TBD | COMMIT-TBD | Points 62.596; T/M/S/K not supplied | Rejected; below v7 67.289 |
+| H142 | Compact group index, 7 parse/5 post workers, huge-page hint | RUN-ID-TBD | 6dec450 | TBD | Locally committed; push/board run pending |
