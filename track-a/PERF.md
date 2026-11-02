@@ -467,4 +467,8 @@ H184 board result: run-590815088b72 scored T=0.054007 s, M=46,202,880 B, S=574, 
 
 H185 board result: run-6164043f1eca scored T=0.064468 s, M=48,709,632 B, S=619, K=21.171700, 66.287786 points. Inline storage for up to three samples increased both time and memory; reverted to H184.
 
-| H186 | Replace dense hour×endpoint group matrix with sparse populated groups, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |
+| H186 | Replace dense hour×endpoint group matrix with per-hour sparse HashMaps, atop H184 | run-6f3fc7b14c3a | e3922627c64d192e737d8d759a44ecee66bd0458 | T=0.058531 s / M=56,606,720 B / S=542 / K=21.995707 / 67.116897 pts | Docker seed-1 hash and worked example passed | Rejected; time and memory increases outweighed the smaller source. Restored H184. |
+
+H186 board result: run-6f3fc7b14c3a scored T=0.058531 s, M=56,606,720 B, S=542, K=21.995707, 67.116897 points. Sparse per-hour HashMaps reduced the matrix line count but increased runtime and memory; reverted to H184.
+
+| H187 | Sparse populated-group vector, sort by output key, merge duplicates in place, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |

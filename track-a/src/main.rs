@@ -475,8 +475,6 @@ fn main() {
     for (position, &endpoint) in order.iter().enumerate() {
         rank[endpoint] = position;
     }
-
-    // The dense hour-by-endpoint matrix had a Group slot for every empty pair; keep only populated keys.
     let mut grouped_ranges = thread::scope(|scope| {
         let joins = ranges
             .iter()
@@ -485,23 +483,32 @@ fn main() {
             .map(|(hour_range, sources)| {
                 let rank = &rank;
                 scope.spawn(move || {
-                    let mut merged: FastMap<usize, Group> = FastMap::default();
+                    let mut groups = Vec::new();
                     for (remap, hour_maps) in sources {
                         for (offset, hour_groups) in hour_maps.into_iter().enumerate() {
                             let hour = hour_range.start + offset;
-                            for (local_endpoint, mut partial) in hour_groups {
+                            for (local_endpoint, partial) in hour_groups {
                                 let key = hour * endpoint_count + rank[remap[local_endpoint]];
-                                if let Some(group) = merged.get_mut(&key) {
-                                    group.latencies.append(&mut partial.latencies);
-                                    group.errors += partial.errors;
-                                } else {
-                                    merged.insert(key, partial);
-                                }
+                                groups.push((key, partial));
                             }
                         }
                     }
-                    let mut groups: Vec<_> = merged.into_iter().collect();
                     groups.sort_unstable_by_key(|(key, _)| *key);
+                    let mut kept = 0;
+                    for read in 0..groups.len() {
+                        if kept != 0 && groups[kept - 1].0 == groups[read].0 {
+                            let (prior, duplicate) = groups.split_at_mut(read);
+                            prior[kept - 1]
+                                .1
+                                .latencies
+                                .append(&mut duplicate[0].1.latencies);
+                            prior[kept - 1].1.errors += duplicate[0].1.errors;
+                        } else {
+                            groups.swap(kept, read);
+                            kept += 1;
+                        }
+                    }
+                    groups.truncate(kept);
                     groups
                 })
             })
@@ -512,7 +519,7 @@ fn main() {
             .collect::<Vec<_>>()
     });
 
-    // Independent populated groups sort in parallel; sorting all values gives the exact ranks.
+    // Independent populated groups sort in parallel; sorting all values gives exact percentile ranks.
     thread::scope(|scope| {
         for groups in &mut grouped_ranges {
             scope.spawn(move || {
