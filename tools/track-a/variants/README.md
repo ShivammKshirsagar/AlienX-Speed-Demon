@@ -1,6 +1,6 @@
 # Track A board variants
 
-Each variant is a complete offline Docker build context derived from `baseline-snapshot2`. Base source SHA-256: `71cf21e17af0ff9b2e672943c3444c346ba5915f493dee68f8424820a59a2157`. H173 (SHA-256 `cf8b969ca1c6324bb9e5d22e8cffc5f36f9ebb161b08c7b7916e30ff8b9863a7`, S=555) scored 66.326361 and is rejected below v7. H174 is now the output-path candidate; the best remains 67.289394.
+Each variant is a complete offline Docker build context derived from `baseline-snapshot2`. Base source SHA-256: `71cf21e17af0ff9b2e672943c3444c346ba5915f493dee68f8424820a59a2157`. H173 (SHA-256 `cf8b969ca1c6324bb9e5d22e8cffc5f36f9ebb161b08c7b7916e30ff8b9863a7`, S=555) scored 66.326361 and is rejected below v7. H178 scored 67.101370, below the board-proven v7 best of 67.289394; v7 is restored as the active fallback.
 
 | Variant | Change | Rust + Docker S estimate | Max RSS proxy | Checks | Exact push procedure |
 |---|---|---:|---:|---|---|
@@ -20,6 +20,6 @@ Each variant is a complete offline Docker build context derived from `baseline-s
 | H175 | H174 exact output offsets with per-hour streaming parallel writes | S=575 | 65.312968 points | Board gates passed | Rejected; run-cb0b856f78a8. |
 | H176 | H174 parallel output buffers written in two waves | S=560 | 64.487523 points | Board gates passed | Rejected; run-5d0099fd4be7. |
 | H177 | H174 one-wave parallel output with active-row capacity reserve | S=575 | 65.874440 points | Board gates passed | Rejected; run-6d2621482e1e. |
-| H178 | H174 one-wave output with a block-based capacity hint | S=559 | Not claimed | `cargo fmt --check` passed | Current candidate; board run pending; source SHA256 `5a3caa90aed8280808c7210f75972d4dac3c3a15ae203800fd6840c2c656ef8a`. |
+| H178 | H174 one-wave output with a block-based capacity hint | S=559 | 67.101370 points | Board gates passed | Rejected below v7; run-8199196f223f. |
 
 v6 passed correctness but failed the required at-or-below-base memory limit, so it is not included as a pushable `v6/` folder. v7 combines two previously isolated changes because the parse optimization targets the measured dominant phase and the exit change adds no second scan. v7 retained the pinned Docker `FROM` lines and `RUSTFLAGS`; no local timing result was used to choose it. Its memory proxy is one full seed-1 Docker process high-water sample minus the 238,836,234-byte input mapping. Use paired board runs as the final judge.

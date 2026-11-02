@@ -13,7 +13,7 @@ The earlier local Rust runs were 0.398, 0.413, 0.427, 0.432, and 0.466 seconds. 
 
 Earlier correctness checks recorded: the worked example in `specs/a-ingest.md` passed; seed 2 full output matched `fe3469ff108066bd7b65f8239bbe27615467b99db182b79919c572c3d2910127`; seed 1 full output matched the hash above. Seeds 2, 3, and 7 sample hashes are retained in the current correctness section below.
 
-The old K estimate used `T=0.427 s`, `M=275.6 MB` Windows working-set proxy, `S=303`, and `D=1`, giving the then-reported indicative `K≈6.48` (about 40.6 points). That estimate is superseded because the Windows timing and memory proxy were not board-equivalent and the earlier line-count method was not the final organizer-style count.
+The old K estimate used `T=0.427 s`, `M=275.6 MB` Windows working-set proxy, `S=303`, and `D=1`, giving the then-reported indicative `Kâ‰ˆ6.48` (about 40.6 points). That estimate is superseded because the Windows timing and memory proxy were not board-equivalent and the earlier line-count method was not the final organizer-style count.
 
 The earlier note said the board-equivalent `check.py` run and offline Docker build were unverified at that time. The subsequent Linux-container check and offline build results are recorded in the current sections below.
 
@@ -63,7 +63,7 @@ WSL reported 16 logical CPUs and affinity `0-15`; this run used `min(16,12)=12` 
 | Boundary planning | 0.069 | 0.084 | 0.089 | 12.5 / 0 | 3,008 |
 | Parse, including worker spawn | 105.821 | 870.154 | 105.430 | 15,534 / 0 | 272,496 |
 | Merge | 44.595 | 34.671 | 10.109 | 3,301.5 / 0 | 279,468 |
-| Scatter | 0.000 | — | — | — | — |
+| Scatter | 0.000 | â€” | â€” | â€” | â€” |
 | Selection | 31.469 | 45.332 | 1.397 | 0 / 0 | 279,468 |
 | Endpoint/output sort | 0.448 | 0.593 | 0.028 | 0.5 / 0 | 279,468 |
 | Output formatting | 25.560 | 21.439 | 4.109 | 2,470 / 0 | 287,826 |
@@ -256,16 +256,16 @@ The tools-only instrumented baseline and experimental candidate were profiled on
 | Phase / observation | mmap baseline | pread candidate |
 |---|---:|---:|
 | Parse, median of 5 | 1.109 s | 0.926 s |
-| Merge, median | about 70–86 ms | about 66 ms |
+| Merge, median | about 70â€“86 ms | about 66 ms |
 | Selection, median | about 32 ms | about 34 ms |
-| Endpoint sort | about 0.5–1.7 ms | included in the same post-parse pipeline |
-| Output formatting | about 36–45 ms | about 46 ms |
-| Output write | about 150–170 ms | about 157 ms |
+| Endpoint sort | about 0.5â€“1.7 ms | included in the same post-parse pipeline |
+| Output formatting | about 36â€“45 ms | about 46 ms |
+| Output write | about 150â€“170 ms | about 157 ms |
 | Instrumented main total, median | about 1.50 s | about 1.253 s |
 | Major faults after parsing | about 3,907 | about 18 |
 | Cgroup memory after parsing / after output | about 281 / 297 MB | about 42 / 58 MB |
 
-The baseline page-fault cost was the largest observed bottleneck. Its mmap parse phase took about 1.1 s and incurred roughly 3,907 major faults. The `pread` version reduced the profiled parse median to about 0.93 s and major faults to about 18, while greatly reducing charged file-page memory. Thread completion was reasonably balanced: the pread workers generally finished within roughly 10–25 ms of one another in the best profiles. Mmap workers had a wider roughly 50 ms finish spread. Thread start times were within a few milliseconds. The 1 MiB pread buffer is reused per worker.
+The baseline page-fault cost was the largest observed bottleneck. Its mmap parse phase took about 1.1 s and incurred roughly 3,907 major faults. The `pread` version reduced the profiled parse median to about 0.93 s and major faults to about 18, while greatly reducing charged file-page memory. Thread completion was reasonably balanced: the pread workers generally finished within roughly 10â€“25 ms of one another in the best profiles. Mmap workers had a wider roughly 50 ms finish spread. Thread start times were within a few milliseconds. The 1 MiB pread buffer is reused per worker.
 
 Thread-count comparisons, each median of five full profiler runs, all with matching hashes:
 
@@ -282,7 +282,7 @@ Every item below was tested in the tools-side profiler copy, not retained in the
 
 | Experiment | Measurement | Decision |
 |---|---|---|
-| `MAP_POPULATE` | mmap phase median about 3.5–3.9 s; parse about 0.22 s; total about 4.17 s; peak about 296 MB | Reverted; pre-faulting moved the cost earlier and made total slower |
+| `MAP_POPULATE` | mmap phase median about 3.5â€“3.9 s; parse about 0.22 s; total about 4.17 s; peak about 296 MB | Reverted; pre-faulting moved the cost earlier and made total slower |
 | `MADV_SEQUENTIAL` | total about 1.45 s versus about 1.50 s; major faults remained about 3,896 versus 3,907 | Reverted; small difference was within VM noise and faults barely changed |
 | `MADV_WILLNEED` | total median about 1.668 s | Reverted; slower |
 | 4 MiB pread chunks | parse median about 0.994 s; total about 1.35 s; peak about 91 MB | Reverted; slower and more memory |
@@ -306,7 +306,7 @@ The expected hashes are the Python reference outputs generated for those samples
 
 The formatted Linux-only Rust source has 313 code lines by `scc`; the Dockerfile contributes 7 lines. The organizer-style count for Rust plus Dockerfile is `S=320`, down from the original 394. Comments and blank lines are not counted. `D=1` because the Rust project has no direct non-std dependencies.
 
-Using the board's supplied time and memory unchanged, the reduction from `S=394` to `S=320` alone scales its K by `(394/320)^0.15`, or about 1.032. That gives a size-only indicative `K≈13.87`; no timing or memory improvement is claimed. The WSL wall medians are not precise enough to estimate a reliable board-time change, and WSL RSS charges mapped input pages differently from the board.
+Using the board's supplied time and memory unchanged, the reduction from `S=394` to `S=320` alone scales its K by `(394/320)^0.15`, or about 1.032. That gives a size-only indicative `Kâ‰ˆ13.87`; no timing or memory improvement is claimed. The WSL wall medians are not precise enough to estimate a reliable board-time change, and WSL RSS charges mapped input pages differently from the board.
 
 This is not an official board result. The benchmark host is WSL2 rather than the scoring host, and the measured wall-time difference is within local run noise. The source-size reduction is the clear change; the 0.05 s wall-time target was not reached.
 
@@ -318,7 +318,7 @@ The final WSL run used 12 workers pinned to CPUs `0-11` on a 16-logical-CPU WSL2
 
 The one requested Docker board-style check passed: image size 30 MB, output SHA-256 `495ca09682b9673ef836a506496177680bb4a3af54255174befddb1f83481cd3`. Its 1.87 s includes Docker startup and is not a scoring-time measurement. `cargo fmt --check` passed for both Rust manifests. The pinned Docker `FROM` lines remain unchanged; the build sets the permitted `RUSTFLAGS="-C target-cpu=x86-64-v3"`.
 
-`scc` is not installed in the environment. A nonblank, non-comment Rust-line approximation counted 489 lines in `src/main.rs`; the Dockerfile has 8 code lines, for `S≈497`. This is not an exact `scc` result. For an indicative K only, scale the board reference `T=0.169 s`, `M=68 MB` by the same-method WSL timing ratio `0.110/0.305` and by the ratio of WSL peak RSS after subtracting the 238,836,234-byte input mapping. This gives estimated `T≈0.06095 s`, `M≈53.19 MB`, `S≈497`, and `K≈22.11` (about 67.23 points) from the supplied formula. These are estimates, not board measurements; the `K≥32` target was not reached.
+`scc` is not installed in the environment. A nonblank, non-comment Rust-line approximation counted 489 lines in `src/main.rs`; the Dockerfile has 8 code lines, for `Sâ‰ˆ497`. This is not an exact `scc` result. For an indicative K only, scale the board reference `T=0.169 s`, `M=68 MB` by the same-method WSL timing ratio `0.110/0.305` and by the ratio of WSL peak RSS after subtracting the 238,836,234-byte input mapping. This gives estimated `Tâ‰ˆ0.06095 s`, `Mâ‰ˆ53.19 MB`, `Sâ‰ˆ497`, and `Kâ‰ˆ22.11` (about 67.23 points) from the supplied formula. These are estimates, not board measurements; the `Kâ‰¥32` target was not reached.
 ## Track A optimization round: 2026-11-01
 
 This section is appended to the existing performance history. Earlier entries above remain in this file. New local measurements are from the WSL A/B records under `tools/track-a/`; no board run IDs were supplied for this round.
@@ -435,4 +435,6 @@ H83 completed successfully on the board (run `run-95ac2b92059b`): T=0.082354 s, 
 | H175 | H174 exact per-hour size offsets with streaming parallel writes | run-cb0b856f78a8 | 25679c4324fa4a301c01cbd584c766d874e7856a | T=0.076954 s / M=41,390,080 B / S=575 / K=20.242277 / 65.312968 pts | Passed gates; memory fell but extra sizing and 72 writes lost too much time |
 | H176 | H174 output buffers written in two bounded waves | run-5d0099fd4be7 | 6717f04953005925102fde2ba02a375b32c00293 | T=0.079591 s / M=46,931,968 B / S=560 / K=19.487246 / 64.487523 pts | Passed gates; memory fell but two output waves regressed time; rejected |
 | H177 | H174 one-wave output with `endpoint.len()+48` capacity per active row | run-6d2621482e1e | 1e2eb13b0f33b242b3b37736130f0f3105c002af | T=0.067338 s / M=50,778,112 B / S=575 / K=20.772502 / 65.874440 pts | Passed gates; capacity pass cut memory but hurt time |
-| H178 | H174 with `32 * range.len() * endpoints.len()` initial output capacity | RUN-ID-TBD | COMMIT-TBD | TBD | Avoids H177's sizing pass; capacity is only a reserve hint; S=559, source SHA256 `5A3CAA90AED8280808C7210F75972D4DAC3C3A15AE203800FD6840C2C656EF8A` |
+| H178 | H174 with `32 * range.len() * endpoints.len()` initial output capacity | run-8199196f223f | 249b11156def0eccfd0305cfcf61577aa474f69b | T=0.059838 s / M=52,527,104 B / S=559 / K=21.979985 / 67.101370 pts | Rejected below v7; reserve hint improved time over H174 but memory and S left K below v7. |
+
+H178 board result: run-8199196f223f scored T=0.059838 s, M=52,527,104 B, S=559, K=21.979985, 67.101370 points. H178 is rejected below the v7 board best (67.289394); restored the board-proven v7 source from commit 73b102f33ad580661005ba129efd396ddf72df0c as the active fallback. H178 source SHA256 was 5A3CAA90AED8280808C7210F75972D4DAC3C3A15AE203800FD6840C2C656EF8A.

@@ -1,6 +1,6 @@
 # Track A: Ingest
 
-H175, H176, and H177 scored 65.312968, 64.487523, and 65.874440. H177's active-row capacity scan reduced memory but cost time. H178 skips that scan and uses a rough allocation hint while keeping the same parallel output path.
+H175, H176, H177, and H178 scored 65.312968, 64.487523, 65.874440, and 67.101370. H178's capacity hint improved time over H174 but its higher memory left it below v7.
 
 AVX2 scans delimiters when the release target supports it, with a scalar fallback for other builds and for the tail of each range. Percentile ranks and error rates use exact integer arithmetic.
 
@@ -10,4 +10,4 @@ None. The solution uses Rust's standard library and small system calls for file 
 
 ## Board status
 
-H83, H173, H174, H175, H176, and H177 remain below v7's best 67.289394. H178 tests a cheaper buffer reserve; the goal remains 71.
+H83, H173, H174, H175, H176, H177, and H178 remain below v7's best 67.289394. The active source is restored to board-proven v7; the goal remains 71.
