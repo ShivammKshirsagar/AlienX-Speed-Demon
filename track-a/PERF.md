@@ -389,10 +389,24 @@ The complete prior log is preserved in [PERF-history.md](../tools/track-a/PERF-h
 
 The latest candidate passed the worked example, empty input, sample seeds 2/3/7, full seed 2, boundary fixtures, single-line input, and the 5,000-endpoint ECAP-growth fixture. The final source is the saved mmap baseline because the packed-record rewrite missed the timing gate and raised the RSS proxy. No Docker check was run.
 
-## Current push candidate: H164
+## Previously selected candidate (H164)
 
-The selected source is H164 in `track-a/src/main.rs` (SHA256 `DBB4E2CCBD8AB7CAE22DCAF68B934C6FE3662BA571C2848A2F3E3442F46F0C65`). Board result is pending; no board run is claimed here. Fill the placeholders after pushing this candidate.
+At that point, H164 was selected in `track-a/src/main.rs` (SHA256 `DBB4E2CCBD8AB7CAE22DCAF68B934C6FE3662BA571C2848A2F3E3442F46F0C65`). Its board result is recorded below.
 
 | Candidate | Board run ID | Board T / M / S / K | Commit |
 |---|---|---|---|
-| H164 | RUN-ID-TBD | TBD | COMMIT-TBD |
+| H164 | run-0e251929474d | 65.398 pts; T/M/S/K not supplied | COMMIT-TBD |
+
+## Board result update
+
+H164 scored 65.398 points on run `run-0e251929474d`, below the author-reported b4d1b99 baseline score of 66.975 points (K=21.85, T=0.066 s, M=47 MB, S=497). H164 is not the current source. I restored `track-a/src/main.rs` from `tools/track-a/baseline-snapshot2/src/main.rs`; the files match at SHA256 `71CF21E17AF0FF9B2E672943C3444C346B`. The restored baseline's prior board result remains the expected reference; no new board run is claimed for this restoration.
+
+| Candidate | Board run ID | Board T / M / S / K | Commit |
+|---|---|---|---|
+| b4d1b99 baseline (restored locally) | RUN-ID-TBD | Prior result: T=0.066 s / M=47 MB / S=497 / K=21.85 / 66.975 pts | b4d1b99 |
+
+## 70-point target iteration
+
+| Candidate | Change | Board run ID | Board T / M / S / K | Result |
+|---|---|---|---|---|
+| v4 | Per-worker latency arena; prepared from independently checked variant | RUN-ID-TBD | TBD | Pending board measurement; local RSS proxy in variants/README.md is not a board result |

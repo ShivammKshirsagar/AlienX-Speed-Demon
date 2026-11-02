@@ -11,3 +11,9 @@
 - H166 (8 parser workers) was rejected vs H164: median wall/CPU and min-based estimate regressed; RSS proxy +108 KB.
 - H167's parser inlining was rejected after median regressions and a lower direct-baseline estimate; H168's previous-endpoint cache, H169 CRC32C hash and H170 sparse-hour rows were also rejected (timing or S cap). H164 remains best shipped.
 - H171 and H172 were rejected. Search paused at the author's request; best push-ready source remains H164 in track-a/src, hash DBB4E2CCBD8AB7CAE22DCAF68B934C6FE3662BA571C2848A2F3E3442F46F0C65. Direct local baseline estimate: T˜0.0492 s, M˜38.532 MB, S=560, K˜25.880 (~70.649 estimated points); not a board result. 80-point goal remains unmet.
+
+- Board result received: H164 run-0e251929474d scored 65.398 pts, below b4d1b99's 66.975. Restored track-a/src from baseline-snapshot2 (SHA256 71CF21E17AF0FF9B2E672943C3444C346B); current source is the previously board-scored baseline pending any new run.
+
+- New active target from the author: reach at least 70 points on the real board; do not stop at local estimates. H164's 65.398 board result is a rejected regression. The next push candidate is the prebuilt, independently checked v4 per-worker latency arena (source SHA256 FE5969EE5867965AB43712C7B9E595D4C49A6549424E732D24D4F1F92D13CD05). track-a/src/main.rs now matches v4; cargo fmt --check passes. No board result exists yet. Keep only a candidate that scores above the current real-board best, record its board ID/metrics, and use the next already-checked isolated variant only after recording this result. Do not use local timing estimates as evidence of board improvement.
+
+- Priority clarification: the active milestone is strictly 70 real-board points. The 80-point goal is deferred and must not be resumed until a board result of at least 70 points is recorded. No board/scoreboard integration is available in this workspace; v4 is awaiting its board run.
