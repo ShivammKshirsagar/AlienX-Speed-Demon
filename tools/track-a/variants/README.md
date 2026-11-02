@@ -18,6 +18,7 @@ Each variant is a complete offline Docker build context derived from `baseline-s
 | H173 | H142 compact group design with 12 parse/12 post workers | S=555 | 66.326361 points | Board gates passed | Rejected; run-388df169828f. |
 | H174 | H173 compact groups plus parallel fixed-hour output and `_exit` | S=559 | 66.738816 points | Board gates passed | Rejected below v7; run-4dc5f1362b5c. |
 | H175 | H174 exact output offsets with per-hour streaming parallel writes | S=575 | 65.312968 points | Board gates passed | Rejected; run-cb0b856f78a8. |
-| H176 | H174 parallel output buffers written in two waves | S=560 | Not claimed | `cargo fmt --check` passed | Current candidate; board run pending; source SHA256 `b25d653c0b11bbbfe575d26c6a5d538dfd26b611408d244b966723ff704d6918`. |
+| H176 | H174 parallel output buffers written in two waves | S=560 | 64.487523 points | Board gates passed | Rejected; run-5d0099fd4be7. |
+| H177 | H174 one-wave parallel output with active-row capacity reserve | S=575 | Not claimed | `cargo fmt --check` passed | Current candidate; board run pending; source SHA256 `d4270056d048e830edb92a02cec325ec070c9204ced4f92e06b20b8887091628`. |
 
 v6 passed correctness but failed the required at-or-below-base memory limit, so it is not included as a pushable `v6/` folder. v7 combines two previously isolated changes because the parse optimization targets the measured dominant phase and the exit change adds no second scan. v7 retained the pinned Docker `FROM` lines and `RUSTFLAGS`; no local timing result was used to choose it. Its memory proxy is one full seed-1 Docker process high-water sample minus the 238,836,234-byte input mapping. Use paired board runs as the final judge.

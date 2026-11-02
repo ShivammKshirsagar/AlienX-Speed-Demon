@@ -371,7 +371,23 @@ fn format_hours(
     groups: &[Group],
     hours: &[[u8; 20]],
 ) -> Vec<u8> {
-    let mut out = Vec::new();
+    let capacity = range
+        .clone()
+        .map(|hour| {
+            order
+                .iter()
+                .map(|&endpoint| {
+                    let group = &groups[hour * endpoints.len() + endpoint];
+                    if group.latencies.is_empty() {
+                        0
+                    } else {
+                        endpoints[endpoint].len() + 48
+                    }
+                })
+                .sum::<usize>()
+        })
+        .sum();
+    let mut out = Vec::with_capacity(capacity);
     for hour in range {
         for &endpoint in order {
             let group = &groups[hour * endpoints.len() + endpoint];
@@ -547,6 +563,19 @@ fn main() {
         .step_by(range_size)
         .map(|start| start..(start + range_size).min(HOURS))
         .collect();
+    let output_buffers = thread::scope(|scope| {
+        let joins = ranges
+            .into_iter()
+            .map(|range| {
+                let (order, endpoints, groups, hours) = (&order, &endpoints, &groups, &hours);
+                scope.spawn(move || format_hours(range, order, endpoints, groups, hours))
+            })
+            .collect::<Vec<_>>();
+        joins
+            .into_iter()
+            .map(|join| join.join().expect("format worker panicked"))
+            .collect::<Vec<_>>()
+    });
     if let Some(parent) = Path::new(&output).parent() {
         std::fs::create_dir_all(parent).expect("create output directory");
     }
@@ -556,41 +585,27 @@ fn main() {
         .truncate(true)
         .open(output)
         .expect("open output");
+    let total_size = output_buffers.iter().map(Vec::len).sum::<usize>();
+    file.set_len(total_size as u64).expect("size output");
     let mut offset = 0u64;
+    let offsets = output_buffers
+        .iter()
+        .map(|buffer| {
+            let start = offset;
+            offset += buffer.len() as u64;
+            start
+        })
+        .collect::<Vec<_>>();
     use std::os::unix::fs::FileExt;
-    for batch in ranges.chunks(workers.div_ceil(2)) {
-        let output_buffers = thread::scope(|scope| {
-            let joins = batch
-                .iter()
-                .cloned()
-                .map(|range| {
-                    let (order, endpoints, groups, hours) = (&order, &endpoints, &groups, &hours);
-                    scope.spawn(move || format_hours(range, order, endpoints, groups, hours))
-                })
-                .collect::<Vec<_>>();
-            joins
-                .into_iter()
-                .map(|join| join.join().expect("format worker panicked"))
-                .collect::<Vec<_>>()
-        });
-        let offsets: Vec<_> = output_buffers
-            .iter()
-            .map(|buffer| {
-                let start = offset;
-                offset += buffer.len() as u64;
-                start
-            })
-            .collect();
-        thread::scope(|scope| {
-            for (buffer, offset) in output_buffers.into_iter().zip(offsets) {
-                let file = &file;
-                scope.spawn(move || {
-                    file.write_all_at(&buffer, offset)
-                        .expect("write output range");
-                });
-            }
-        });
-    }
+    thread::scope(|scope| {
+        for (buffer, offset) in output_buffers.into_iter().zip(offsets) {
+            let file = &file;
+            scope.spawn(move || {
+                file.write_all_at(&buffer, offset)
+                    .expect("write output range");
+            });
+        }
+    });
     unsafe extern "C" {
         fn _exit(status: i32) -> !;
     }
