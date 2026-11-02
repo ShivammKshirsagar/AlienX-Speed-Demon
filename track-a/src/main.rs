@@ -146,7 +146,6 @@ fn parse_uint(bytes: &[u8]) -> u32 {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-#[inline]
 unsafe fn find_line_fields_avx2(line: &[u8]) -> (usize, usize, usize) {
     use std::arch::x86_64::*;
     let (mut p, mut first, mut second, mut found) = (28, 0, 0, 0);

@@ -503,4 +503,8 @@ H193 board result: run-7c71f97384e7 scored T=0.076639 s, M=46,415,872 B, S=574, 
 
 H194 board result: run-b8235acb0b79 scored T=0.059130 s, M=46,583,808 B, S=572, K=22.570649, 67.677203 points. Branchless status accumulation did not improve the board score; restored H184.
 
-| H195 | Inline the AVX2 line-field scanner, atop H184 | RUN-ID-TBD | COMMIT-TBD | TBD | Local timing not used | Pending implementation and board score |
+| H195 | Inline the AVX2 line-field scanner, atop H184 | run-70228de89dfe | 6bb35965d680990e268b888914a112b5e9ba17e1 | T=0.058600 s / M=46,723,072 B / S=575 / K=22.641184 / 67.744957 pts | Docker seed-1 hash and worked example passed | Rejected below H184. Restored H184. |
+
+H195 board result: run-70228de89dfe scored T=0.058600 s, M=46,723,072 B, S=575, K=22.641184, 67.744957 points. Inlining the scanner did not improve the board score; restored H184.
+
+H184 remains the active best: run-590815088b72, T=0.054007 s, M=46,202,880 B, S=574, K=23.643337, 68.685439 points.

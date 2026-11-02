@@ -63,4 +63,6 @@ Do not fill run IDs or board metrics from local measurements. v7 (parser plus ex
 
 | H194 branchless status count | 93d68c30a12d86bf05a85cc8e61fdff89788e2ef | run-b8235acb0b79 | 0.059130 s | 46,583,808 B | 572 | 22.570649 | 67.677203 points; correctness passed, rejected below H184 |
 
-| H184 integer group-key hash | Pending commit | RUN-ID-TBD | TBD | TBD | TBD | TBD | Specializes eight-byte group-key hashing; full Docker check pending. |
+| H184 integer group-key hash | 184487c11bd7d4815ebb97b4ebf4a189631ddc03 | run-590815088b72 | 0.054007 s | 46,202,880 B | 574 | 23.643337 | 68.685439 points; current best |
+
+| H195 inline AVX2 scanner | 6bb35965d680990e268b888914a112b5e9ba17e1 | run-70228de89dfe | 0.058600 s | 46,723,072 B | 575 | 22.641184 | 67.744957 points; rejected below H184 |
