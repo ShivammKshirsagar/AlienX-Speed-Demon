@@ -25,3 +25,5 @@
 - Board result: v5 scored 66.661 points (run ID and T/M/S/K not supplied), below v2's 66.987; reject it. Prepared next isolated candidate v3 (open-address endpoint lookup), source SHA256 56FFC27305677B25E7EA847D1378F0E9BCB18A2D747D4C8193734E47542A2655; cargo fmt --check passes. v2 remains the best known board result. Continue until a board run reaches at least 70 points; 80 remains deferred.
 
 - Board result: v3 scored 66.506 points (run ID and T/M/S/K not supplied), below v2's 66.987; reject it. Prepared next isolated candidate v1 (_exit(0) after output), source SHA256 5B52FD4C7A75D57E9E00C709FF59832E764C36DD3D9F7C5EC1C267F9CA6261CE; cargo fmt --check passes. v2 remains the best known board result. Continue toward 70; 80 remains deferred.
+
+- Board result: v1 scored 67.034 points (run ID and T/M/S/K not supplied), making it the best known result but still below 70. Prepared v7 (v1 exit path plus v2 parser), source SHA256 2FD6CA6CFA5551C735C3A2D2D812D767D1334FA60570302F480D2E157960AE17; cargo fmt --check passes. v1 remains fallback if v7 scores lower. Continue until the live board reports at least 70; 80 remains deferred.
